@@ -1,6 +1,7 @@
 import java.util.Properties
 
 import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
+import net.manub.embeddedkafka.EmbeddedKafka
 import org.apache.flink.formats.avro.AvroDeserializationSchema
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
@@ -11,11 +12,13 @@ import org.apache.flink.api.scala._
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer
 import org.apache.flink.types.Row
 import org.apache.kafka.clients.consumer.ConsumerConfig
+import org.apache.kafka.common.serialization.Deserializer
 import org.junit.runner.RunWith
 import org.scalatestplus.junit.JUnitRunner
 
+import scala.collection.mutable.ListBuffer
 import scala.concurrent.Future
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
 import scala.concurrent.ExecutionContext.Implicits._
 
 @RunWith(classOf[JUnitRunner])
@@ -54,20 +57,6 @@ class FlinkJoinProblemSpec extends TestUtils {
     tEnv.registerFunction("RatesTTF", ratesTTF)
     tEnv.registerTable("RatesTable", ratesTable)
 
-    val ratesCcyIsoJoin = tEnv.sqlQuery(
-      """
-        |  SELECT ccyIsoCode, ccyIsoName
-        |  FROM CcyIsoTable, RatesTable
-        |  WHERE ccyIsoCode = ratesCcyIsoCode
-        |""".stripMargin)
-
-    tEnv.toAppendStream[Row](ratesCcyIsoJoin)
-      .map(
-        r=>{
-          println(s"ratesCcyIsoJoin : $r")
-        }
-      )
-
 
     val faresStream  = makeFlinkConsumer[TaxiFareDTO](AvroDeserializationSchema.forSpecific[TaxiFareDTO](classOf[TaxiFareDTO]), kafkaProperties,0L, _.getTs, taxiFareTopicName)
     faresStream.map{
@@ -76,6 +65,21 @@ class FlinkJoinProblemSpec extends TestUtils {
     val faresTable = tEnv.fromDataStream(faresStream, 'fareCcyIsoCode, 'price, 'ts.as('fares_ts), 'ts.rowtime.as('fares_rowtime) )
     tEnv.registerTable("FaresTable", faresTable)
 
+    // This join get flushed for BOTH rates for some reason
+    // and results in twice the number of expected results.
+    val ratesCcyIsoJoin = tEnv.sqlQuery(
+      """
+        |  SELECT ccyIsoCode, ccyIsoName, rate
+        |  FROM CcyIsoTable, RatesTable
+        |  WHERE ccyIsoCode = ratesCcyIsoCode
+        |""".stripMargin)
+
+    tEnv.toRetractStream[Row](ratesCcyIsoJoin)
+      .map(
+        r=>{
+          println(s"ratesCcyIsoJoin : $r")
+        }
+      )
 
     val fareRatesJoin = tEnv.sqlQuery(
       """
@@ -131,15 +135,30 @@ class FlinkJoinProblemSpec extends TestUtils {
     val taxi1 = makeTaxiFareDTO("USD", 15D, 11000L)
     publishTaxiFareDTO(taxi1)(kafkaConfig)
 
-    // Now change the rate and flush
-    val usd2 = makeRatesDTO("USD", 1.2D, ts=21000L)
+    // Now change the rate to flush.
+    val usd2 = makeRatesDTO("USD", 1.2D, ts=12000L)
     publishRatesDTO(usd2)(kafkaConfig)
 
-    val taxi3 =  makeTaxiFareDTO("USD", 15D, 26000L)
-    publishTaxiFareDTO(taxi3)(kafkaConfig)
-    val taxi4 = makeTaxiFareDTO("USD", 20D, 31000L)
-    publishTaxiFareDTO(taxi4)(kafkaConfig)
+    val messages = ListBuffer[String]()
 
-    Thread.sleep(10 * 1000L)
+    Try {
+      EmbeddedKafka.consumeNumberMessagesFrom(resultsTopicName, 5)(kafkaConfig,
+        new Deserializer[String] {
+          override def configure(configs: java.util.Map[String, _], isKey: Boolean): Unit = {}
+          override def deserialize(topic: String, data: Array[Byte]): String = {
+            val result = new String(data)
+            messages += result
+            result
+          }
+          override def close(): Unit = {}
+        }
+      )
+    }
+
+    messages.foreach{
+      result => println(s"RESULT in kafka : $result")
+    }
+
+    messages.size shouldBe 1
   }
 }

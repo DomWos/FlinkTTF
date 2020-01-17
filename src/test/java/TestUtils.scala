@@ -14,7 +14,6 @@ import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization.{Serializer => kSerializer}
 import org.scalatest.concurrent.Eventually.{eventually, interval, timeout}
 import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
-import org.slf4j.LoggerFactory
 
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -143,7 +142,7 @@ class StringResultSeralizer extends SerializationSchema[(Boolean, Row)] {
 
         override def serialize(br: (Boolean,Row) ): Array[Byte] = {
                 val (b, row) = br
-                println(s"RESULT $br")
+                println(s"retract    $br")
                 val vs = row.toString
                 println(s"publishing $vs")
                 vs.getBytes
