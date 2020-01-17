@@ -1,0 +1,19 @@
+{
+"type": "record",
+  "name": "TaxiFareDTO",
+  "namespace": "bbb.avro.dto",
+  "fields": [
+    {
+      "name": "fareCcyIsoCode",
+      "type": "string"
+    },
+    {
+      "name": "price",
+      "type": "double"
+    },
+    {
+      "name": "ts",
+      "type": "long"
+    }
+  ]
+}

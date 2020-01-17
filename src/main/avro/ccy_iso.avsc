@@ -1,0 +1,20 @@
+{
+"type": "record",
+  "name": "CcyIsoDTO",
+  "namespace": "bbb.avro.dto",
+  "description": "This is a low volatility table holding currency names.",
+  "fields": [
+    {
+      "name": "ccyIsoCode",
+      "type": "string"
+    },
+    {
+      "name": "ccyIsoName",
+      "type": "string"
+    },
+    {
+      "name": "ts",
+      "type": "long"
+    }
+  ]
+}

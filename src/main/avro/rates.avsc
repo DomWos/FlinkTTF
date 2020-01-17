@@ -1,0 +1,19 @@
+{
+"type": "record",
+  "name": "RatesDTO",
+  "namespace": "bbb.avro.dto",
+  "fields": [
+    {
+      "name": "ratesCcyIsoCode",
+      "type": "string"
+    },
+    {
+      "name": "rate",
+      "type": "double"
+    },
+    {
+      "name": "ts",
+      "type": "long"
+    }
+  ]
+}
