@@ -94,7 +94,7 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
         | WHERE fareCcyIsoCode = ratesCcyIsoCode
         |""".stripMargin)
 
-    tEnv.toRetractStream[Row](fareRatesJoin).map(r=>{println(s"fareRatesJoin : $r"})
+    tEnv.toRetractStream[Row](fareRatesJoin).map(r=>{println(s"fareRatesJoin : $r")})
 
     val resultPublisher: FlinkKafkaProducer[(Boolean, Row)] = new FlinkKafkaProducer[(Boolean, Row)](resultsTopicName, new StringResultSeralizer(), kafkaProperties)
     val outStream = tEnv.toRetractStream[Row]( fareRatesJoin )
@@ -180,19 +180,13 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     messages3.size shouldBe 1
     messages3.head shouldBe "171000,200.0,GBP,POUND_STERLING"
 
-
     // Lets change the GBP rate again
     val gbp3 = makeRatesDTO("GBP", 12.34D, ts=50000000L)
     publishRatesDTO(gbp3)(kafkaConfig)
 
+    // and flush out the stream
     val taxi5 = makeTaxiFareDTO("GBP", 10D, 51000000L)
     publishTaxiFareDTO(taxi5)(kafkaConfig)
-    // and in rates stream
-
-    val taxi6 = makeTaxiFareDTO("GBP", 20D, 52000000L)
-    publishTaxiFareDTO(taxi6)(kafkaConfig)
-    val taxi7 = makeTaxiFareDTO("GBP", 30D, 53000000L)
-    publishTaxiFareDTO(taxi7)(kafkaConfig)
 
     val messages4 = getMessagesFromKafka( 15 )
 
