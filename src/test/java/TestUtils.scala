@@ -4,13 +4,17 @@ import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
 import net.manub.embeddedkafka.{EmbeddedKafka, EmbeddedKafkaConfig}
 import org.apache.avro.specific.SpecificDatumWriter
 import org.apache.flink.api.common.serialization.SerializationSchema
+import org.apache.flink.api.common.state.{MapStateDescriptor, ReadOnlyBroadcastState}
+import org.apache.flink.api.common.typeinfo.Types
 import org.apache.flink.formats.avro.AvroDeserializationSchema
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
+import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer
 import org.apache.flink.types.Row
+import org.apache.flink.util.Collector
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization.{Deserializer, Serializer => kSerializer}
 import org.scalatest.concurrent.Eventually.{eventually, interval, timeout}
@@ -184,5 +188,36 @@ class StringResultSeralizer extends SerializationSchema[(Boolean, Row)] {
                 val vs = row.toString
                 println(s"publishing $vs")
                 vs.getBytes
+        }
+}
+
+class CcyIsoBroadcastKeyedFunction extends KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]() {
+        val ccyDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.STRING, Types.POJO(classOf[CcyIsoDTO]))
+        override def processElement(in1: RatesDTO, readOnlyContext: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#ReadOnlyContext,
+                                    collector: Collector[RatesWithCcyName]): Unit = {
+                val ccyIsoDTO: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(ccyDescriptor)
+                if( ccyIsoDTO != null ){
+                        if( in1 != null ) {
+                                val ccyCode = in1.getRatesCcyIsoCode.toString
+                                val ccy = ccyIsoDTO.get(ccyCode)
+                                if( ccy != null ) {
+                                        collector.collect({
+                                                val ccr = new RatesWithCcyName()
+                                                ccr.setRatesCcyIsoCode(in1.getRatesCcyIsoCode.toString)
+                                                ccr.setRate(in1.getRate)
+                                                ccr.setTs(in1.getTs)
+                                                ccr.setCcyName(ccy.getCcyIsoName.toString)
+                                                ccr
+                                        })
+                                }
+                        }
+                }
+        }
+        override def processBroadcastElement(in2: CcyIsoDTO,
+                                             context: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#Context,
+                                             collector: Collector[RatesWithCcyName]): Unit = {
+                val bcState = context.getBroadcastState(ccyDescriptor)
+                bcState.put(in2.getCcyIsoCode.toString, in2)
+                println(s"processBroadcastElement $in2")
         }
 }

@@ -51,67 +51,28 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     val rulDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.VOID, Types.POJO[CcyIsoDTO](classOf[CcyIsoDTO]))
     val broadcastCcys = ccyIsoStream.broadcast(rulDescriptor)
 
-
     val ratesStream =
       makeFlinkConsumer[RatesDTO](AvroDeserializationSchema.forSpecific[RatesDTO](classOf[RatesDTO]),
         kafkaProperties,0L, _.getTs, ratesTopicName)
-    ratesStream.map{
-      r=>println(r.toString)
-    }
+    ratesStream.map{r=>println(r.toString)}
+
     val ratesPartitionedStream: KeyedStream[RatesDTO, String] = ratesStream.keyBy( new KeySelector[RatesDTO, String](){
       override def getKey(in: RatesDTO): String = in.getRatesCcyIsoCode.toString
     })
-    //val ratesTable = tEnv.fromDataStream(ratesStream, 'ratesCcyIsoCode, 'rate, 'ts.as('rates_ts), 'ts.rowtime.as('rates_rowtime) )
-
 
     // connect broadcast
     val ccyMatches: DataStream[RatesWithCcyName] = ratesPartitionedStream
       .connect(broadcastCcys)
-      .process( new KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]() {
-        val ccyDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.STRING, Types.POJO(classOf[CcyIsoDTO]))
-        override def processElement(in1: RatesDTO, readOnlyContext: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#ReadOnlyContext,
-                                    collector: Collector[RatesWithCcyName]): Unit = {
-          val ccyIsoDTO: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(ccyDescriptor)
-          if( ccyIsoDTO != null ){
-            if( in1 != null ) {
-              val ccyCode = in1.getRatesCcyIsoCode.toString
-              val ccy = ccyIsoDTO.get(ccyCode)
-              if( ccy != null ) {
-                collector.collect({
-                  val ccr = new RatesWithCcyName()
-                  ccr.setRatesCcyIsoCode(in1.getRatesCcyIsoCode.toString)
-                  ccr.setRate(in1.getRate)
-                  ccr.setTs(in1.getTs)
-                  ccr.setCcyName(ccy.getCcyIsoName.toString)
-                  ccr
-                })
-              }
-            }
-          }
-        }
-        override def processBroadcastElement(in2: CcyIsoDTO,
-                                             context: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#Context,
-                                             collector: Collector[RatesWithCcyName]): Unit = {
-          val bcState = context.getBroadcastState(ccyDescriptor)
-          bcState.put(in2.getCcyIsoCode.toString, in2)
-          println(s"processBroadcastElement $in2")
-        }
-      })
+      .process( new CcyIsoBroadcastKeyedFunction )
 
-    ccyMatches.map{
-      r=> println(s"ccyMatches $r")
-    }
+    ccyMatches.map{ r=> println(s"ccyMatches $r")}
 
     val ratesCcyMatchTable = ccyMatches.toTable(tEnv, 'ratesCcyIsoCode, 'rate, 'ts.as('rates_ts), 'ccyName, 'ts.rowtime.as('rates_rowtime) )
     tEnv.registerTable("RatesCcyMatchTable", ratesCcyMatchTable)
     val ratesTTF = ratesCcyMatchTable.createTemporalTableFunction('rates_rowtime, 'ratesCcyIsoCode)
     tEnv.registerFunction("RatesTTF", ratesTTF)
 
-    tEnv.toAppendStream[Row](
-      tEnv.sqlQuery("SELECT * FROM RatesCcyMatchTable"))
-      .map(
-        r=>println(s"RatesCcyMatchTable $r")
-      )
+    tEnv.toAppendStream[Row](tEnv.sqlQuery("SELECT * FROM RatesCcyMatchTable")).map(r=>println(s"RatesCcyMatchTable $r"))
 
     val faresStream  = makeFlinkConsumer[TaxiFareDTO](AvroDeserializationSchema.forSpecific[TaxiFareDTO](classOf[TaxiFareDTO]), kafkaProperties,0L, _.getTs, taxiFareTopicName)
     val asPojo = faresStream.map{
@@ -133,31 +94,7 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
         | WHERE fareCcyIsoCode = ratesCcyIsoCode
         |""".stripMargin)
 
-//    val fareRatesJoin = tEnv.sqlQuery(
-//      """
-//        | SELECT fares_ts, price * rate AS conv_fare, fareCcyIsoCode
-//        | FROM FaresTable,
-//        | RatesCcyMatchTable
-//        | WHERE fareCcyIsoCode = ratesCcyIsoCode
-//        |""".stripMargin)
-
-    tEnv.toRetractStream[Row](fareRatesJoin)
-      .map(
-        r=>{
-          println(s"fareRatesJoin : $r")
-        }
-      )
-
-//    val allJoined = fareRatesJoin
-//      .join(ratesCcyMatchTable)
-//        .where('fareCcyIsoCode === 'ccyIsoCode)
-//
-//    tEnv.toAppendStream[Row](allJoined)
-//      .map(
-//        r=>{
-//          println(s"allJoined : $r")
-//        }
-//      )
+    tEnv.toRetractStream[Row](fareRatesJoin).map(r=>{println(s"fareRatesJoin : $r"})
 
     val resultPublisher: FlinkKafkaProducer[(Boolean, Row)] = new FlinkKafkaProducer[(Boolean, Row)](resultsTopicName, new StringResultSeralizer(), kafkaProperties)
     val outStream = tEnv.toRetractStream[Row]( fareRatesJoin )
@@ -177,7 +114,8 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     // Give flink a chance to connect everything up.
     Thread.sleep(10000L)
 
-    // Register a currency
+    // Register a currency WITH MaxValue for the timestamp
+    // this will stop the ccy iso from blocking event time in the operators.
     val gbpCcyIsoDTO = makeCcyIsoDTO("GBP", "POUND_STERLING", ts= Long.MaxValue)
     publishCcyIsoDTO(gbpCcyIsoDTO)
 
