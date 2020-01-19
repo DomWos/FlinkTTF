@@ -2,14 +2,13 @@ import java.util.Properties
 
 import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
 import net.manub.embeddedkafka.EmbeddedKafka
+import org.apache.flink.api.scala._
 import org.apache.flink.formats.avro.AvroDeserializationSchema
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.table.api.TableConfig
-import org.apache.flink.table.api.scala.StreamTableEnvironment
-import org.apache.flink.table.api.scala._
-import org.apache.flink.api.scala._
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer
+import org.apache.flink.table.api.TableConfig
+import org.apache.flink.table.api.scala.{StreamTableEnvironment, _}
 import org.apache.flink.types.Row
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.serialization.Deserializer
@@ -17,12 +16,12 @@ import org.junit.runner.RunWith
 import org.scalatestplus.junit.JUnitRunner
 
 import scala.collection.mutable.ListBuffer
+import scala.concurrent.ExecutionContext.Implicits._
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
-import scala.concurrent.ExecutionContext.Implicits._
 
 @RunWith(classOf[JUnitRunner])
-class FlinkJoinProblemSpec extends TestUtils {
+class FlinkJoinSpec extends TestUtils {
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)

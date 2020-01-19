@@ -6,17 +6,20 @@ import org.apache.avro.specific.SpecificDatumWriter
 import org.apache.flink.api.common.serialization.SerializationSchema
 import org.apache.flink.formats.avro.AvroDeserializationSchema
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
+import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer
 import org.apache.flink.types.Row
 import org.apache.kafka.clients.producer.ProducerRecord
-import org.apache.kafka.common.serialization.{Serializer => kSerializer}
+import org.apache.kafka.common.serialization.{Deserializer, Serializer => kSerializer}
 import org.scalatest.concurrent.Eventually.{eventually, interval, timeout}
 import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
 
+import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration._
 import scala.language.postfixOps
+import scala.util.Try
 
 class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
 
@@ -30,6 +33,7 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
         }
         def publishRatesDTO(event: RatesDTO)(implicit kafkaConfig: EmbeddedKafkaConfig): Unit = {
                 val pr = new ProducerRecord[String, RatesDTO](ratesTopicName, event)
+                println(s"publishRatesDTO : $event")
                 EmbeddedKafka.publishToKafka(pr)(kafkaConfig, ratesDtoSerializer)
         }
         def makeRatesDTO(ccyIsoCode: String, rate: Double, ts: Long) ={
@@ -50,6 +54,7 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
         }
         def publishTaxiFareDTO(fare: TaxiFareDTO)(implicit kafkaConfig: EmbeddedKafkaConfig): Unit = {
                 val pr = new ProducerRecord[String, TaxiFareDTO](taxiFareTopicName, fare)
+                println(s"publishTaxiFareDTO : $fare")
                 EmbeddedKafka.publishToKafka(pr)(kafkaConfig, taxiFareDtoSerializer)
         }
         def makeTaxiFareDTO(ccyIsoCode: String, price: Double, ts: Long) ={
@@ -71,6 +76,7 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
         }
         def publishCcyIsoDTO(ccy: CcyIsoDTO)(implicit kafkaConfig: EmbeddedKafkaConfig): Unit = {
                 val pr = new ProducerRecord[String, CcyIsoDTO](ccyIsoTopicName, ccy)
+                println(s"publishCcyIsoDTO : $ccy")
                 EmbeddedKafka.publishToKafka(pr)(kafkaConfig, ccyIsoFareDtoSerializer)
         }
 
@@ -101,18 +107,29 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
                 val rawConsumer = new FlinkKafkaConsumer[T](topicName, deserializationSchema, kafkaConsumerConfig)
                 val consumer = env
                   .addSource(rawConsumer)(deserializationSchema.getProducedType)
-                  .assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[T] {
-                          private val maxOutOfOrderness = maxOutOfOrderTime
-                          var currentMaxTimestamp: Long = 0L
-                          override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = {
-                                  val timestamp = timestampExtractor(element)
-                                  currentMaxTimestamp = math.max(timestamp, currentMaxTimestamp)
-                                  timestamp
+                  .assignTimestampsAndWatermarks(
+                          new AscendingTimestampExtractor[T] {
+                                  override def extractAscendingTimestamp(t: T): Long = {
+                                          val timestamp = timestampExtractor(t)
+                                          println(s"$topicName timestamp $timestamp")
+                                          timestamp
+                                  }
                           }
-                          override def getCurrentWatermark(): Watermark = {
-                                  new Watermark(currentMaxTimestamp - maxOutOfOrderness)
-                          }
-                  }
+//                          new AssignerWithPeriodicWatermarks[T] {
+//                          private val maxOutOfOrderness = maxOutOfOrderTime
+//                          var currentMaxTimestamp: Long = 0L
+//                          override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = {
+//                                  val timestamp = timestampExtractor(element)
+//                                  currentMaxTimestamp = math.max(timestamp, currentMaxTimestamp)
+//                                  println(s"$topicName timestamp $timestamp")
+//                                  timestamp
+//                          }
+//                          override def getCurrentWatermark: Watermark = {
+//                                  val cw = currentMaxTimestamp - maxOutOfOrderness
+//                                  println(s"$topicName cw $cw")
+//                                  new Watermark(cw)
+//                          }
+//                  }
                   )
                 consumer
         }
@@ -132,6 +149,27 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
         override def afterAll = {
                 EmbeddedKafka.deleteTopics(topics)
                 EmbeddedKafka.stop()
+        }
+
+        def getMessagesFromKafka(maxMessages: Int, timeoutSec: Int=5) = {
+                val messages = ListBuffer[String]()
+                Try { eventually(timeout(timeoutSec.seconds), interval(1.second)) {
+                        EmbeddedKafka.consumeNumberMessagesFrom(resultsTopicName, maxMessages)(kafkaConfig,
+                                new Deserializer[String] {
+                                        override def configure(configs: java.util.Map[String, _], isKey: Boolean): Unit = {}
+
+                                        override def deserialize(topic: String, data: Array[Byte]): String = {
+                                                val result = new String(data)
+                                                messages += result
+                                                result
+                                        }
+
+                                        override def close(): Unit = {}
+                                }
+                        )
+                }
+                }
+                messages
         }
 
 }
