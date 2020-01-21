@@ -12,7 +12,7 @@
     <url>http://humn.ai</url>
 
     <properties>
-        <flink.version>1.8.0</flink.version>
+        <flink.version>1.9.0</flink.version>
         <junit.version>4.12</junit.version>
         <kafka.version>2.2.1</kafka.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -88,17 +88,6 @@
             <artifactId>junit</artifactId>
             <version>${junit.version}</version>
             <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-connector-elasticsearch6_${scala.binary.version}</artifactId>
-            <version>${flink.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-connector-elasticsearch_${scala.binary.version}</artifactId>
-            <version>${flink.version}</version>
-            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.apache.kafka</groupId>

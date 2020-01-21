@@ -1,13 +1,13 @@
 import java.util.Properties
 
 import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
-import org.apache.flink.api.common.state.MapStateDescriptor
-import org.apache.flink.api.common.typeinfo.Types
 import org.apache.flink.api.java.functions.KeySelector
 import org.apache.flink.api.scala._
 import org.apache.flink.formats.avro.AvroDeserializationSchema
-import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.{CheckpointingMode, TimeCharacteristic}
+import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
 import org.apache.flink.streaming.api.scala.{DataStream, KeyedStream, StreamExecutionEnvironment}
+import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer
 import org.apache.flink.table.api.TableConfig
 import org.apache.flink.table.api.scala.{StreamTableEnvironment, _}
@@ -21,7 +21,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 @RunWith(classOf[JUnitRunner])
-class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
+class FlinkJoinTwoInputStreamOperatorSpec extends TestUtils {
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)
@@ -34,18 +34,65 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
   env.setParallelism(1)
   env.setMaxParallelism(1)
   env.setBufferTimeout(1000L)
+  env.enableCheckpointing(1000L)
+  env.getCheckpointConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE)
+  env.getCheckpointConfig.setMinPauseBetweenCheckpoints(500)
+  env.getCheckpointConfig.setCheckpointTimeout(1000)
+  env.getCheckpointConfig.setMaxConcurrentCheckpoints(1)
+
   implicit val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env, new TableConfig())
+
+  override def beforeAll: Unit = {
+    super.beforeAll
+
+    // prime Kafka with some rates and fares
+    // publish rates
+    publishRatesDTO(makeRatesDTO("GBP", rate=2.0D, ts=6100L))
+    // publish taxi fares
+    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 15D, 7000L))
+  }
 
   "Demo" should
     """
       Show use to Broadcast to enrich rates stream prior to joining with TaxiFares
     """.stripMargin in {
 
-    val ccyIsoStream = makeFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]),
-      kafkaProperties, 0L, _.getTs, ccyIsoTopicName)
-    ccyIsoStream.map{
-      r=>println(r.toString)
+    // Make a collection of CCYs as if read from a database.
+    val e: List[CcyIsoDTO] =
+        List.fill(100)(makeCcyIsoDTO("USD", "Yankee_Dollar", ts= Long.MaxValue-1))
+    val elements  = e ++ List(makeCcyIsoDTO("GBP", "POUND_STERLING", ts= Long.MaxValue-1))
+
+    // Stream the CCYs
+    val dbStreamCcys = env.fromElements( elements : _* )
+
+    // Subscribe to CCY updates from Kinesis
+    val ccyIsoStreamKafka = makeFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]),
+      kafkaProperties, 0L, _.getTs, ccyIsoTopicName).assignTimestampsAndWatermarks( new AssignerWithPeriodicWatermarks[CcyIsoDTO] {
+      override def getCurrentWatermark: Watermark = {
+        new Watermark(Long.MaxValue)
+      }
+      override def extractTimestamp(element: CcyIsoDTO, previousElementTimestamp: Long): Long = {
+        println(s"CcyIsoTopic timestamp $previousElementTimestamp")
+        Long.MaxValue
+      }
+    })
+    ccyIsoStreamKafka.map{
+      r=>println(s"ccyIsoStreamKafka ${r.toString}")
     }
+
+   val ccyIsoStream = ccyIsoStreamKafka.union(dbStreamCcys)
+    //    .keyBy("ccyIsoCode").process (
+//      new KeyedProcessFunction[Tuple, CcyIsoDTO, CcyIsoDTO](){
+//        override def processElement(value: CcyIsoDTO, ctx: KeyedProcessFunction[Tuple, CcyIsoDTO, CcyIsoDTO]#Context, out: Collector[CcyIsoDTO]): Unit = {
+//          out.
+//        }
+//      }
+//    )
+
+    ccyIsoStream.map{
+      r=>println(s"ccyIsoStream UNION ${r.toString}")
+    }
+
     val broadcastCcys = ccyIsoStream.broadcast(CcyIsoBroadcastKeyedFunction.ccyDescriptor)
 
     val ratesStream =
@@ -111,24 +158,15 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     // Give flink a chance to connect everything up.
     Thread.sleep(10000L)
 
-    // Register a currency WITH MaxValue for the timestamp
-    // this will stop the ccy iso from blocking event time in the operators.
-    val gbpCcyIsoDTO = makeCcyIsoDTO("GBP", "POUND_STERLING", ts= Long.MaxValue)
-    publishCcyIsoDTO(gbpCcyIsoDTO)
-
-    // publish a rates
-    val gbp1 = makeRatesDTO("GBP", rate=2.0D, ts=6100L)
-    publishRatesDTO(gbp1)
-
-    // publish taxi fares
-    val taxi1 = makeTaxiFareDTO("GBP", 15D, 7000L)
-    publishTaxiFareDTO(taxi1)
+    /*
+    makeCcyIsoDTO("USD", "Yankee_Dollar", ts= Long.MaxValue),
+      makeCcyIsoDTO("DKK", "Viking_Crown", ts= Long.MaxValue),
+    makeCcyIsoDTO("PLN", "Solidarność_Złoty", ts= Long.MaxValue)
+     */
 
     //  Flush event time watermark in all operators
-    //publishCcyIsoDTO(makeCcyIsoDTO("GBP", "POUND_STERLING", ts= 170000L))
     publishRatesDTO(makeRatesDTO("GBP", rate=2.0D, ts=170000L))
     publishTaxiFareDTO(makeTaxiFareDTO("GBP", 15D, 170000L))
-
 
     Thread.sleep(5000L)
 
@@ -138,62 +176,9 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
       result => println(s"RESULT in kafka : $result")
     }
     messages.size shouldBe 1
-    messages.head shouldBe "7000,30.0,GBP,POUND_STERLING"
-
-    // Change the name of the currency
-    publishCcyIsoDTO(makeCcyIsoDTO("GBP", "QUID", ts= Long.MaxValue))
-
-    // Now publish another taxi fare
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 100D, 170001L))
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 100D, 170002L))
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 100D, 171000L))  // WHERE THE FUCK IS THIS ONE ?
-
-    // Flush all streams
-    publishRatesDTO(makeRatesDTO("GBP", rate=2.0D, ts=270000L))
-
-    val messages2 = getMessagesFromKafka( 5 )
-
-    messages2.foreach{
-      result => println(s"RESULT in kafka : $result")
-    }
-
-    messages2.size shouldBe 3
-    //messages2.head shouldBe "170000,200.0,GBP"
-
-
-    // Now move time along in taxi fare stream
-    val gbp2 = makeRatesDTO("GBP", rate=10.0D, ts=270001L)
-    publishRatesDTO(gbp2)(kafkaConfig)
-
-    val taxi8 = makeTaxiFareDTO("GBP", 100D, 270001L)
-    publishTaxiFareDTO(taxi8)(kafkaConfig)
-
-    val messages3 = getMessagesFromKafka( 15 )
-
-    messages3.foreach{
-      result => println(s"RESULT in kafka : $result")
-    }
-
-    messages3.size shouldBe 1
-    messages3.head shouldBe "171000,200.0,GBP,POUND_STERLING"
-
-    // Lets change the GBP rate again
-    val gbp3 = makeRatesDTO("GBP", 12.34D, ts=50000000L)
-    publishRatesDTO(gbp3)(kafkaConfig)
-
-    // and flush out the stream
-    val taxi5 = makeTaxiFareDTO("GBP", 10D, 51000000L)
-    publishTaxiFareDTO(taxi5)(kafkaConfig)
-
-    val messages4 = getMessagesFromKafka( 15 )
-
-    messages4.foreach{
-      result => println(s"RESULT in kafka : $result")
-    }
-
-    messages4.size shouldBe 1
-    val results = messages4.toArray
-    results(0) shouldBe "270001,1000.0,GBP,QUID"
+    val r1 = messages.toArray
+    r1(0) shouldBe "7000,30.0,GBP,POUND_STERLING"
+    //r1(1) shouldBe "7000,1125.0,PLN,Solidarność_Złoty"
 
   }
 }

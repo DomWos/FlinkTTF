@@ -69,7 +69,6 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
                 c.build()
         }
 
-
         val ccyIsoTopicName = "CcyIsoTopic"
         val ccyIsoFareDtoSerializer: kSerializer[CcyIsoDTO] = new kSerializer[CcyIsoDTO] {
                 val writer = new SpecificDatumWriter(classOf[CcyIsoDTO])
@@ -119,21 +118,6 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
                                           timestamp
                                   }
                           }
-//                          new AssignerWithPeriodicWatermarks[T] {
-//                          private val maxOutOfOrderness = maxOutOfOrderTime
-//                          var currentMaxTimestamp: Long = 0L
-//                          override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = {
-//                                  val timestamp = timestampExtractor(element)
-//                                  currentMaxTimestamp = math.max(timestamp, currentMaxTimestamp)
-//                                  println(s"$topicName timestamp $timestamp")
-//                                  timestamp
-//                          }
-//                          override def getCurrentWatermark: Watermark = {
-//                                  val cw = currentMaxTimestamp - maxOutOfOrderness
-//                                  println(s"$topicName cw $cw")
-//                                  new Watermark(cw)
-//                          }
-//                  }
                   )
                 consumer
         }
@@ -192,10 +176,10 @@ class StringResultSeralizer extends SerializationSchema[(Boolean, Row)] {
 }
 
 class CcyIsoBroadcastKeyedFunction extends KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]() {
-        val ccyDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.STRING, Types.POJO(classOf[CcyIsoDTO]))
+
         override def processElement(in1: RatesDTO, readOnlyContext: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#ReadOnlyContext,
                                     collector: Collector[RatesWithCcyName]): Unit = {
-                val ccyIsoDTO: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(ccyDescriptor)
+                val ccyIsoDTO: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(CcyIsoBroadcastKeyedFunction.ccyDescriptor)
                 if( ccyIsoDTO != null ){
                         if( in1 != null ) {
                                 val ccyCode = in1.getRatesCcyIsoCode.toString
@@ -209,15 +193,25 @@ class CcyIsoBroadcastKeyedFunction extends KeyedBroadcastProcessFunction[String,
                                                 ccr.setCcyName(ccy.getCcyIsoName.toString)
                                                 ccr
                                         })
+                                } else {
+                                        println(s"No matching ccy iso code : $ccyCode")
+                                        System.exit(-1)
+                                        //throw new Exception(s"No matching ccy iso code : $ccyCode")
                                 }
                         }
+                } else {
+                        throw new Exception ("Could not find descriptor for CcyIsoBroadcastKeyedFunction")
                 }
         }
         override def processBroadcastElement(in2: CcyIsoDTO,
                                              context: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#Context,
                                              collector: Collector[RatesWithCcyName]): Unit = {
-                val bcState = context.getBroadcastState(ccyDescriptor)
+                val bcState = context.getBroadcastState(CcyIsoBroadcastKeyedFunction.ccyDescriptor)
                 bcState.put(in2.getCcyIsoCode.toString, in2)
-                println(s"processBroadcastElement $in2")
+                //println(s"processBroadcastElement $in2")
         }
+}
+
+object CcyIsoBroadcastKeyedFunction {
+        val ccyDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.STRING, Types.POJO(classOf[CcyIsoDTO]))
 }
