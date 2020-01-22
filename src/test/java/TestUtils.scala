@@ -1,15 +1,18 @@
 import java.util.Properties
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
 
 import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
 import net.manub.embeddedkafka.{EmbeddedKafka, EmbeddedKafkaConfig}
 import org.apache.avro.specific.SpecificDatumWriter
+import org.apache.avro.util.Utf8
 import org.apache.flink.api.common.serialization.SerializationSchema
 import org.apache.flink.api.common.state.{MapStateDescriptor, ReadOnlyBroadcastState}
 import org.apache.flink.api.common.typeinfo.Types
 import org.apache.flink.formats.avro.AvroDeserializationSchema
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
-import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction
+import org.apache.flink.streaming.api.functions.co.{KeyedBroadcastProcessFunction, KeyedCoProcessFunction}
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor
+import org.apache.flink.streaming.api.operators.co.{CoBroadcastWithKeyedOperator, KeyedCoProcessOperator}
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer
@@ -118,7 +121,63 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
                                           timestamp
                                   }
                           }
+//                          new AssignerWithPeriodicWatermarks[T] {
+//                          private val maxOutOfOrderness = maxOutOfOrderTime
+//                          var currentMaxTimestamp: Long = 0L
+//                          override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = {
+//                                  val timestamp = timestampExtractor(element)
+//                                  currentMaxTimestamp = math.max(timestamp, currentMaxTimestamp)
+//                                  println(s"$topicName timestamp $timestamp")
+//                                  timestamp
+//                          }
+//                          override def getCurrentWatermark: Watermark = {
+//                                  val cw = currentMaxTimestamp - maxOutOfOrderness
+//                                  println(s"$topicName cw $cw")
+//                                  new Watermark(cw)
+//                          }
+//                  }
                   )
+                consumer
+        }
+
+        def makeFlinkConsumerLaggingWatermarks[T](deserializationSchema: AvroDeserializationSchema[T],
+                                 kafkaConsumerConfig: Properties,
+                                 maxOutOfOrderTime: Long,
+                                 timestampExtractor: T => Long,
+                                 topicName: String
+                                )(implicit env: StreamExecutionEnvironment ): DataStream[T]  = {
+                val rawConsumer = new FlinkKafkaConsumer[T](topicName, deserializationSchema, kafkaConsumerConfig)
+                val consumer = env
+                  .addSource(rawConsumer)(deserializationSchema.getProducedType)
+                    .assignTimestampsAndWatermarks(
+                            new AssignerWithPeriodicWatermarks[T] {
+                                      private val maxOutOfOrderness = maxOutOfOrderTime
+                                      var currentMaxTimestamp: Long = 0L
+                                      override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = {
+                                              val timestamp = timestampExtractor(element)
+                                              currentMaxTimestamp = math.min(timestamp, currentMaxTimestamp)
+                                              println(s"$topicName timestamp $timestamp")
+                                              timestamp
+                                      }
+                                      override def getCurrentWatermark: Watermark = {
+                                              val cw = currentMaxTimestamp - maxOutOfOrderness
+                                              println(s"$topicName cw $cw")
+                                              new Watermark(cw)
+                                      }
+                              }
+                    )
+                consumer
+        }
+
+        def makeFlinkConsumerNoWatermark[T](deserializationSchema: AvroDeserializationSchema[T],
+                                             kafkaConsumerConfig: Properties,
+                                             maxOutOfOrderTime: Long,
+                                             timestampExtractor: T => Long,
+                                             topicName: String
+                                            )(implicit env: StreamExecutionEnvironment ): DataStream[T]  = {
+                val rawConsumer = new FlinkKafkaConsumer[T](topicName, deserializationSchema, kafkaConsumerConfig)
+                val consumer = env
+                  .addSource(rawConsumer)(deserializationSchema.getProducedType)
                 consumer
         }
 
@@ -175,43 +234,58 @@ class StringResultSeralizer extends SerializationSchema[(Boolean, Row)] {
         }
 }
 
-class CcyIsoBroadcastKeyedFunction extends KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]() {
 
-        override def processElement(in1: RatesDTO, readOnlyContext: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#ReadOnlyContext,
+class CcyIsoBroadcastRaceConditionAverseKeyedFunction extends KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]() {
+
+        override def processElement(rate: RatesDTO, readOnlyContext: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#ReadOnlyContext,
                                     collector: Collector[RatesWithCcyName]): Unit = {
-                val ccyIsoDTO: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(CcyIsoBroadcastKeyedFunction.ccyDescriptor)
-                if( ccyIsoDTO != null ){
-                        if( in1 != null ) {
-                                val ccyCode = in1.getRatesCcyIsoCode.toString
-                                val ccy = ccyIsoDTO.get(ccyCode)
-                                if( ccy != null ) {
-                                        collector.collect({
-                                                val ccr = new RatesWithCcyName()
-                                                ccr.setRatesCcyIsoCode(in1.getRatesCcyIsoCode.toString)
-                                                ccr.setRate(in1.getRate)
-                                                ccr.setTs(in1.getTs)
-                                                ccr.setCcyName(ccy.getCcyIsoName.toString)
-                                                ccr
-                                        })
-                                } else {
-                                        println(s"No matching ccy iso code : $ccyCode")
-                                        System.exit(-1)
-                                        //throw new Exception(s"No matching ccy iso code : $ccyCode")
+                val ccyIsoBcast: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(CcyIsoBroadcastRaceConditionAverseKeyedFunction.ccyDescriptor)
+                if( rate != null ) {
+                        val ccyCode = rate.getRatesCcyIsoCode.toString
+                        val ccyIsoDto: CcyIsoDTO = ccyIsoBcast.get(ccyCode)
+                        if( currencyIsoIsLate(ccyIsoDto) ) {
+                                System.err.println(s"No matching ccyIsoDto iso code : $ccyCode")
+                                if ( !CcyIsoBroadcastRaceConditionAverseKeyedFunction.values.containsKey(ccyCode) ) {
+                                        CcyIsoBroadcastRaceConditionAverseKeyedFunction.values.put(ccyCode, new ConcurrentLinkedQueue[RatesDTO]())
                                 }
+                                CcyIsoBroadcastRaceConditionAverseKeyedFunction.values.get(ccyCode).add(rate)
+                        } else {
+                                if( thereAreBackloggedRates(ccyCode) ){
+                                        val rates = CcyIsoBroadcastRaceConditionAverseKeyedFunction.values.get(ccyCode)
+                                        rates.toArray.foreach {
+                                                rate  => doCollect(rate.asInstanceOf[RatesDTO], ccyIsoDto, collector)
+                                        }
+                                        CcyIsoBroadcastRaceConditionAverseKeyedFunction.values.remove(ccyCode)
+                                }
+                                doCollect(rate, ccyIsoDto, collector)
                         }
-                } else {
-                        throw new Exception ("Could not find descriptor for CcyIsoBroadcastKeyedFunction")
                 }
         }
+
+        private def currencyIsoIsLate(ccyIsoDto: CcyIsoDTO) = ccyIsoDto == null
+        private def thereAreBackloggedRates( ccyCode: String ) = CcyIsoBroadcastRaceConditionAverseKeyedFunction.values.containsKey(ccyCode)
+
+        private def doCollect(rate: RatesDTO, ccyIsoDTO: CcyIsoDTO, collector: Collector[RatesWithCcyName]) : Unit = {
+                System.err.println(s"doCollect rate: $rate, ccyIsoDTO:$ccyIsoDTO")
+                collector.collect({
+                        val ccr = new RatesWithCcyName()
+                        ccr.setRatesCcyIsoCode(rate.getRatesCcyIsoCode.toString)
+                        ccr.setRate(rate.getRate)
+                        ccr.setTs(rate.getTs)
+                        ccr.setCcyName(ccyIsoDTO.getCcyIsoName.toString)
+                        ccr
+                })
+        }
+
         override def processBroadcastElement(in2: CcyIsoDTO,
                                              context: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#Context,
                                              collector: Collector[RatesWithCcyName]): Unit = {
-                val bcState = context.getBroadcastState(CcyIsoBroadcastKeyedFunction.ccyDescriptor)
+                val bcState = context.getBroadcastState(CcyIsoBroadcastRaceConditionAverseKeyedFunction.ccyDescriptor)
                 bcState.put(in2.getCcyIsoCode.toString, in2)
-                //println(s"processBroadcastElement $in2")
         }
 }
 
-object CcyIsoBroadcastKeyedFunction {
+object CcyIsoBroadcastRaceConditionAverseKeyedFunction {
         val ccyDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.STRING, Types.POJO(classOf[CcyIsoDTO]))
+        val values = new ConcurrentHashMap[String, ConcurrentLinkedQueue[RatesDTO]]()
 }

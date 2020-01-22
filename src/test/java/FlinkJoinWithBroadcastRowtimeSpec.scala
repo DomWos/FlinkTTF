@@ -1,8 +1,6 @@
 import java.util.Properties
 
 import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
-import org.apache.flink.api.common.state.MapStateDescriptor
-import org.apache.flink.api.common.typeinfo.Types
 import org.apache.flink.api.java.functions.KeySelector
 import org.apache.flink.api.scala._
 import org.apache.flink.formats.avro.AvroDeserializationSchema
@@ -46,7 +44,7 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     ccyIsoStream.map{
       r=>println(r.toString)
     }
-    val broadcastCcys = ccyIsoStream.broadcast(CcyIsoBroadcastKeyedFunction.ccyDescriptor)
+    val broadcastCcys = ccyIsoStream.broadcast(CcyIsoBroadcastRaceConditionAverseKeyedFunction.ccyDescriptor)
 
     val ratesStream =
       makeFlinkConsumer[RatesDTO](AvroDeserializationSchema.forSpecific[RatesDTO](classOf[RatesDTO]),
@@ -60,7 +58,7 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     // connect broadcast
     val ccyMatches: DataStream[RatesWithCcyName] = ratesPartitionedStream
       .connect(broadcastCcys)
-      .process( new CcyIsoBroadcastKeyedFunction )
+      .process( new CcyIsoBroadcastRaceConditionAverseKeyedFunction )
 
     ccyMatches.map{ r=> println(s"ccyMatches $r")}
 

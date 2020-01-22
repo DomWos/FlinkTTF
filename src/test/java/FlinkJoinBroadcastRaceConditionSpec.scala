@@ -4,10 +4,9 @@ import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
 import org.apache.flink.api.java.functions.KeySelector
 import org.apache.flink.api.scala._
 import org.apache.flink.formats.avro.AvroDeserializationSchema
-import org.apache.flink.streaming.api.{CheckpointingMode, TimeCharacteristic}
-import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
+import org.apache.flink.streaming.api.environment.CheckpointConfig.ExternalizedCheckpointCleanup
 import org.apache.flink.streaming.api.scala.{DataStream, KeyedStream, StreamExecutionEnvironment}
-import org.apache.flink.streaming.api.watermark.Watermark
+import org.apache.flink.streaming.api.{CheckpointingMode, TimeCharacteristic}
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer
 import org.apache.flink.table.api.TableConfig
 import org.apache.flink.table.api.scala.{StreamTableEnvironment, _}
@@ -21,7 +20,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 @RunWith(classOf[JUnitRunner])
-class FlinkJoinTwoInputStreamOperatorSpec extends TestUtils {
+class FlinkJoinBroadcastRaceConditionSpec extends TestUtils {
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)
@@ -39,15 +38,15 @@ class FlinkJoinTwoInputStreamOperatorSpec extends TestUtils {
   env.getCheckpointConfig.setMinPauseBetweenCheckpoints(500)
   env.getCheckpointConfig.setCheckpointTimeout(1000)
   env.getCheckpointConfig.setMaxConcurrentCheckpoints(1)
+  env.getCheckpointConfig.enableExternalizedCheckpoints(ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION)
 
   implicit val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env, new TableConfig())
 
   override def beforeAll: Unit = {
     super.beforeAll
-
     // prime Kafka with some rates and fares
     // publish rates
-    publishRatesDTO(makeRatesDTO("GBP", rate=2.0D, ts=6100L))
+    publishRatesDTO(makeRatesDTO("GBP", rate = 2.0D, ts = 6100L))
     // publish taxi fares
     publishTaxiFareDTO(makeTaxiFareDTO("GBP", 15D, 7000L))
   }
@@ -58,56 +57,38 @@ class FlinkJoinTwoInputStreamOperatorSpec extends TestUtils {
     """.stripMargin in {
 
     // Make a collection of CCYs as if read from a database.
+    // At 100000 USDs the test fails
     val e: List[CcyIsoDTO] =
-        List.fill(100)(makeCcyIsoDTO("USD", "Yankee_Dollar", ts= Long.MaxValue-1))
-    val elements  = e ++ List(makeCcyIsoDTO("GBP", "POUND_STERLING", ts= Long.MaxValue-1))
+        List.fill(10)(makeCcyIsoDTO("USD", "Yankee_Dollar", ts= Long.MaxValue))
+    val elements  = e ++ List(makeCcyIsoDTO("GBP", "POUND_STERLING", ts= Long.MaxValue))
 
     // Stream the CCYs
     val dbStreamCcys = env.fromElements( elements : _* )
 
     // Subscribe to CCY updates from Kinesis
     val ccyIsoStreamKafka = makeFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]),
-      kafkaProperties, 0L, _.getTs, ccyIsoTopicName).assignTimestampsAndWatermarks( new AssignerWithPeriodicWatermarks[CcyIsoDTO] {
-      override def getCurrentWatermark: Watermark = {
-        new Watermark(Long.MaxValue)
-      }
-      override def extractTimestamp(element: CcyIsoDTO, previousElementTimestamp: Long): Long = {
-        println(s"CcyIsoTopic timestamp $previousElementTimestamp")
-        Long.MaxValue
-      }
-    })
-    ccyIsoStreamKafka.map{
-      r=>println(s"ccyIsoStreamKafka ${r.toString}")
-    }
+      kafkaProperties, 0L, _.getTs, ccyIsoTopicName)
 
-   val ccyIsoStream = ccyIsoStreamKafka.union(dbStreamCcys)
-    //    .keyBy("ccyIsoCode").process (
-//      new KeyedProcessFunction[Tuple, CcyIsoDTO, CcyIsoDTO](){
-//        override def processElement(value: CcyIsoDTO, ctx: KeyedProcessFunction[Tuple, CcyIsoDTO, CcyIsoDTO]#Context, out: Collector[CcyIsoDTO]): Unit = {
-//          out.
-//        }
-//      }
-//    )
+    val ccyIsoStream = ccyIsoStreamKafka.union(dbStreamCcys)
 
-    ccyIsoStream.map{
-      r=>println(s"ccyIsoStream UNION ${r.toString}")
-    }
+    val broadcastCcys = ccyIsoStream.broadcast(CcyIsoBroadcastRaceConditionAverseKeyedFunction.ccyDescriptor)
 
-    val broadcastCcys = ccyIsoStream.broadcast(CcyIsoBroadcastKeyedFunction.ccyDescriptor)
+    Thread.sleep(30000L)
 
     val ratesStream =
       makeFlinkConsumer[RatesDTO](AvroDeserializationSchema.forSpecific[RatesDTO](classOf[RatesDTO]),
         kafkaProperties,0L, _.getTs, ratesTopicName)
     ratesStream.map{r=>println(r.toString)}
 
-    val ratesPartitionedStream: KeyedStream[RatesDTO, String] = ratesStream.keyBy( new KeySelector[RatesDTO, String](){
-      override def getKey(in: RatesDTO): String = in.getRatesCcyIsoCode.toString
-    })
+    val ratesPartitionedStream: KeyedStream[RatesDTO, String] =
+      ratesStream.keyBy( new KeySelector[RatesDTO, String](){
+          override def getKey(in: RatesDTO): String = in.getRatesCcyIsoCode.toString
+      })
 
     // connect broadcast
     val ccyMatches: DataStream[RatesWithCcyName] = ratesPartitionedStream
       .connect(broadcastCcys)
-      .process( new CcyIsoBroadcastKeyedFunction )
+      .process( new CcyIsoBroadcastRaceConditionAverseKeyedFunction )
 
     ccyMatches.map{ r=> println(s"ccyMatches $r")}
 
@@ -158,15 +139,9 @@ class FlinkJoinTwoInputStreamOperatorSpec extends TestUtils {
     // Give flink a chance to connect everything up.
     Thread.sleep(10000L)
 
-    /*
-    makeCcyIsoDTO("USD", "Yankee_Dollar", ts= Long.MaxValue),
-      makeCcyIsoDTO("DKK", "Viking_Crown", ts= Long.MaxValue),
-    makeCcyIsoDTO("PLN", "Solidarność_Złoty", ts= Long.MaxValue)
-     */
-
-    //  Flush event time watermark in all operators
-    publishRatesDTO(makeRatesDTO("GBP", rate=2.0D, ts=170000L))
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 15D, 170000L))
+    publishCcyIsoDTO( makeCcyIsoDTO("PLN", "Solidarność_Złoty", ts = Long.MaxValue))
+    publishRatesDTO(makeRatesDTO("GBP", rate=3.0D, ts=170000L))
+    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 50D, 170000L))
 
     Thread.sleep(5000L)
 
@@ -178,7 +153,15 @@ class FlinkJoinTwoInputStreamOperatorSpec extends TestUtils {
     messages.size shouldBe 1
     val r1 = messages.toArray
     r1(0) shouldBe "7000,30.0,GBP,POUND_STERLING"
-    //r1(1) shouldBe "7000,1125.0,PLN,Solidarność_Złoty"
+
+    publishRatesDTO(makeRatesDTO("GBP", rate=4.0D, ts=2170000L))
+    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 100D, 2170000L))
+
+    Thread.sleep(5000L)
+
+    val messages2 = getMessagesFromKafka( 5, 10 )
+    messages2.size shouldBe 1
+    messages2.head shouldBe "170000,150.0,GBP,POUND_STERLING"
 
   }
 }
