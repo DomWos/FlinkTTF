@@ -23,7 +23,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 @RunWith(classOf[JUnitRunner])
-class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
+class FlinkJoinWithDelayedBroadcast extends TestUtils {
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)
@@ -51,11 +51,13 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     val rulDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.VOID, Types.POJO[CcyIsoDTO](classOf[CcyIsoDTO]))
     val broadcastCcys = ccyIsoStream.broadcast(rulDescriptor)
 
+
     val ratesStream =
       makeFlinkConsumer[RatesDTO](AvroDeserializationSchema.forSpecific[RatesDTO](classOf[RatesDTO]),
         kafkaProperties,0L, _.getTs, ratesTopicName)
-    ratesStream.map{r=>println(r.toString)}
-
+    ratesStream.map{
+      r=>println(r.toString)
+    }
     val ratesPartitionedStream: KeyedStream[RatesDTO, String] = ratesStream.keyBy( new KeySelector[RatesDTO, String](){
       override def getKey(in: RatesDTO): String = in.getRatesCcyIsoCode.toString
     })
@@ -63,16 +65,22 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     // connect broadcast
     val ccyMatches: DataStream[RatesWithCcyName] = ratesPartitionedStream
       .connect(broadcastCcys)
-      .process( new CcyIsoBroadcastKeyedFunction )
+      .process( new DelayedKeyedBroadcast())
 
-    ccyMatches.map{ r=> println(s"ccyMatches $r")}
+    ccyMatches.map{
+      r=> println(s"ccyMatches $r")
+    }
 
-    val ratesCcyMatchTable = ccyMatches.toTable(tEnv, 'ratesCcyIsoCode, 'rate, 'ts.as('rates_ts), 'ccyName, 'ts.rowtime.as('rates_rowtime) )
+    val ratesCcyMatchTable = ccyMatches.toTable(tEnv, 'ratesCcyIsoCode, 'rate, 'ts.as('rates_ts), 'ccyName, 'ts.proctime.as('rates_rowtime) )
     tEnv.registerTable("RatesCcyMatchTable", ratesCcyMatchTable)
     val ratesTTF = ratesCcyMatchTable.createTemporalTableFunction('rates_rowtime, 'ratesCcyIsoCode)
     tEnv.registerFunction("RatesTTF", ratesTTF)
 
-    tEnv.toAppendStream[Row](tEnv.sqlQuery("SELECT * FROM RatesCcyMatchTable")).map(r=>println(s"RatesCcyMatchTable $r"))
+    tEnv.toAppendStream[Row](
+      tEnv.sqlQuery("SELECT * FROM RatesCcyMatchTable"))
+      .map(
+        r=>println(s"RatesCcyMatchTable $r")
+      )
 
     val faresStream  = makeFlinkConsumer[TaxiFareDTO](AvroDeserializationSchema.forSpecific[TaxiFareDTO](classOf[TaxiFareDTO]), kafkaProperties,0L, _.getTs, taxiFareTopicName)
     val asPojo = faresStream.map{
@@ -83,18 +91,23 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
         f.setTs(r.getTs)
         f
     }
-    val faresTable = tEnv.fromDataStream(asPojo, 'fareCcyIsoCode, 'price, 'ts.as('fares_ts), 'ts.rowtime.as('fares_rowtime) )
+    val faresTable = tEnv.fromDataStream(asPojo, 'fareCcyIsoCode, 'price, 'ts.as('fares_ts), 'ts.proctime.as('fares_rowtime) )
     tEnv.registerTable("FaresTable", faresTable)
 
     val fareRatesJoin = tEnv.sqlQuery(
       """
-        | SELECT fares_ts, price * rate AS conv_fare, fareCcyIsoCode, ccyName
+        | SELECT fares_ts, price * rate AS conv_fare, fareCcyIsoCode
         | FROM FaresTable,
         | LATERAL TABLE( RatesTTF(fares_rowtime) )
         | WHERE fareCcyIsoCode = ratesCcyIsoCode
         |""".stripMargin)
 
-    tEnv.toRetractStream[Row](fareRatesJoin).map(r=>{println(s"fareRatesJoin : $r")})
+    tEnv.toRetractStream[Row](fareRatesJoin)
+      .map(
+        r=>{
+          println(s"fareRatesJoin : $r")
+        }
+      )
 
     val resultPublisher: FlinkKafkaProducer[(Boolean, Row)] = new FlinkKafkaProducer[(Boolean, Row)](resultsTopicName, new StringResultSeralizer(), kafkaProperties)
     val outStream = tEnv.toRetractStream[Row]( fareRatesJoin )
@@ -104,34 +117,30 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
       env.execute()
     }.onComplete {
       case Success(value) =>
-      case Failure(exception) => {
+      case Failure(exception) =>
         println(exception.getMessage)
         exception.printStackTrace()
         fail()
-      }
     }
 
     // Give flink a chance to connect everything up.
-    Thread.sleep(10000L)
 
-    // Register a currency WITH MaxValue for the timestamp
-    // this will stop the ccy iso from blocking event time in the operators.
-    val gbpCcyIsoDTO = makeCcyIsoDTO("GBP", "POUND_STERLING", ts= Long.MaxValue)
-    publishCcyIsoDTO(gbpCcyIsoDTO)
+    // Register a currency
+    val gbp1 = makeRatesDTO("GBP", rate=2.0D, ts=6100L) //We put the non-broadcast element first to prove that it will still be matched.
+    Thread.sleep(5000)
+
+    val gbpCcyIsoDTO = makeCcyIsoDTO("GBP", "POUND_STERLING", ts= 1L)
+    publishCcyIsoDTO(gbpCcyIsoDTO)(kafkaConfig)
+    Thread.sleep(5000)
 
     // publish a rates
-    val gbp1 = makeRatesDTO("GBP", rate=2.0D, ts=6100L)
-    publishRatesDTO(gbp1)
-
+    publishRatesDTO(gbp1)(kafkaConfig)
+    Thread.sleep(15000)
     // publish taxi fares
     val taxi1 = makeTaxiFareDTO("GBP", 15D, 7000L)
-    publishTaxiFareDTO(taxi1)
-
-    //  Flush event time watermark in all operators
-    //publishCcyIsoDTO(makeCcyIsoDTO("GBP", "POUND_STERLING", ts= 170000L))
-    publishRatesDTO(makeRatesDTO("GBP", rate=2.0D, ts=170000L))
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 15D, 170000L))
-
+    publishTaxiFareDTO(taxi1)(kafkaConfig)
+    val taxi2 = makeTaxiFareDTO("GBP", 15D, 10000L)
+    publishTaxiFareDTO(taxi2)(kafkaConfig)
 
     Thread.sleep(5000L)
 
@@ -141,18 +150,11 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
       result => println(s"RESULT in kafka : $result")
     }
     messages.size shouldBe 1
-    messages.head shouldBe "7000,30.0,GBP,POUND_STERLING"
-
-    // Change the name of the currency
-    publishCcyIsoDTO(makeCcyIsoDTO("GBP", "QUID", ts= Long.MaxValue))
+    messages.head shouldBe "7000,30.0,GBP"
 
     // Now publish another taxi fare
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 100D, 170001L))
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 100D, 170002L))
-    publishTaxiFareDTO(makeTaxiFareDTO("GBP", 100D, 171000L))  // WHERE THE FUCK IS THIS ONE ?
-
-    // Flush all streams
-    publishRatesDTO(makeRatesDTO("GBP", rate=2.0D, ts=270000L))
+    val taxi3 = makeTaxiFareDTO("GBP", 100D, 170000L)//171000L)
+    publishTaxiFareDTO(taxi3)(kafkaConfig)
 
     val messages2 = getMessagesFromKafka( 5 )
 
@@ -160,15 +162,15 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
       result => println(s"RESULT in kafka : $result")
     }
 
-    messages2.size shouldBe 3
-    //messages2.head shouldBe "170000,200.0,GBP"
+    messages2.size shouldBe 1
+    messages2.head shouldBe "170000,200.0,GBP"
 
 
     // Now move time along in taxi fare stream
-    val gbp2 = makeRatesDTO("GBP", rate=10.0D, ts=270001L)
+    val gbp2 = makeRatesDTO("GBP", rate=10.0D, ts=25000000L)
     publishRatesDTO(gbp2)(kafkaConfig)
 
-    val taxi8 = makeTaxiFareDTO("GBP", 100D, 270001L)
+    val taxi8 = makeTaxiFareDTO("GBP", 100D, 25000000L)
     publishTaxiFareDTO(taxi8)(kafkaConfig)
 
     val messages3 = getMessagesFromKafka( 15 )
@@ -178,15 +180,21 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
     }
 
     messages3.size shouldBe 1
-    messages3.head shouldBe "171000,200.0,GBP,POUND_STERLING"
+    messages3.head shouldBe "25000000,1000.0,GBP"
+
 
     // Lets change the GBP rate again
     val gbp3 = makeRatesDTO("GBP", 12.34D, ts=50000000L)
     publishRatesDTO(gbp3)(kafkaConfig)
 
-    // and flush out the stream
     val taxi5 = makeTaxiFareDTO("GBP", 10D, 51000000L)
     publishTaxiFareDTO(taxi5)(kafkaConfig)
+    // and in rates stream
+
+    val taxi6 = makeTaxiFareDTO("GBP", 20D, 52000000L)
+    publishTaxiFareDTO(taxi6)(kafkaConfig)
+    val taxi7 = makeTaxiFareDTO("GBP", 30D, 53000000L)
+    publishTaxiFareDTO(taxi7)(kafkaConfig)
 
     val messages4 = getMessagesFromKafka( 15 )
 
@@ -194,9 +202,28 @@ class FlinkJoinWithBroadcastRowtimeSpec extends TestUtils {
       result => println(s"RESULT in kafka : $result")
     }
 
-    messages4.size shouldBe 1
+    messages4.size shouldBe 3
     val results = messages4.toArray
-    results(0) shouldBe "270001,1000.0,GBP,QUID"
+    results(0) shouldBe "51000000,123.4,GBP"
+    results(1) shouldBe "52000000,246.8,GBP"
+    results(2) shouldBe "53000000,370.2,GBP"
+
+
+    // What happens if we publish a very old taxi fare?
+    val taxiLate = makeTaxiFareDTO("USD", 10D, 1000L)
+    publishTaxiFareDTO(taxiLate)(kafkaConfig)
+
+    val messages5 = getMessagesFromKafka( 15 )
+
+    messages5.foreach{
+      result => println(s"RESULT in kafka : $result")
+    }
+
+    messages5.size shouldBe 3
+    val results5 = messages4.toArray
+    results5(0) shouldBe "51000000,123.4,GBP"
+    results5(1) shouldBe "52000000,246.8,GBP"
+    results5(2) shouldBe "53000000,370.2,GBP"
 
   }
 }

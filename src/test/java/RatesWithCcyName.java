@@ -9,6 +9,13 @@ public class RatesWithCcyName {
 
     public RatesWithCcyName() { }
 
+    public RatesWithCcyName(String ratesCcyIsoCode, Double rate, long ts, String ccyName) {
+        this.ratesCcyIsoCode = ratesCcyIsoCode;
+        this.rate = rate;
+        this.ts = ts;
+        this.ccyName = ccyName;
+    }
+
     public String getRatesCcyIsoCode() {
         return ratesCcyIsoCode;
     }
