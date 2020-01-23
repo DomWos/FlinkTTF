@@ -7,7 +7,7 @@ import org.apache.flink.api.common.serialization.SerializationSchema
 import org.apache.flink.api.common.state.{MapStateDescriptor, ReadOnlyBroadcastState}
 import org.apache.flink.api.common.typeinfo.Types
 import org.apache.flink.formats.avro.AvroDeserializationSchema
-import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
+import org.apache.flink.streaming.api.functions.{AssignerWithPeriodicWatermarks, AssignerWithPunctuatedWatermarks}
 import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor
 import org.apache.flink.streaming.api.scala._
@@ -111,30 +111,26 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
                 val rawConsumer = new FlinkKafkaConsumer[T](topicName, deserializationSchema, kafkaConsumerConfig)
                 val consumer = env
                   .addSource(rawConsumer)(deserializationSchema.getProducedType)
-                  .assignTimestampsAndWatermarks(
-                          new AscendingTimestampExtractor[T] {
-                                  override def extractAscendingTimestamp(t: T): Long = {
-                                          val timestamp = timestampExtractor(t)
-                                          println(s"$topicName timestamp $timestamp")
-                                          timestamp
-                                  }
-                          }
-//                          new AssignerWithPeriodicWatermarks[T] {
-//                          private val maxOutOfOrderness = maxOutOfOrderTime
-//                          var currentMaxTimestamp: Long = 0L
-//                          override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = {
-//                                  val timestamp = timestampExtractor(element)
-//                                  currentMaxTimestamp = math.max(timestamp, currentMaxTimestamp)
-//                                  println(s"$topicName timestamp $timestamp")
-//                                  timestamp
-//                          }
-//                          override def getCurrentWatermark: Watermark = {
-//                                  val cw = currentMaxTimestamp - maxOutOfOrderness
-//                                  println(s"$topicName cw $cw")
-//                                  new Watermark(cw)
-//                          }
-//                  }
-                  )
+                  .assignTimestampsAndWatermarks(new AscendingTimestampExtractor[T] {
+                          override def extractAscendingTimestamp(element: T): Long = timestampExtractor(element)
+                  })
+                consumer
+        }
+
+        def makeIdlingFlinkConsumer[T](deserializationSchema: AvroDeserializationSchema[T],
+                                 kafkaConsumerConfig: Properties,
+                                 maxOutOfOrderTime: Long,
+                                 timestampExtractor: T => Long,
+                                 topicName: String
+                                )(implicit env: StreamExecutionEnvironment ): DataStream[T]  = {
+                val rawConsumer = new IdlingFlinkKafkaConsumer[T](topicName, deserializationSchema, kafkaConsumerConfig)
+                val consumer = env
+                  .addSource(rawConsumer)(deserializationSchema.getProducedType)
+                  .assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[T] {
+                          override def getCurrentWatermark: Watermark =  new Watermark(Long.MaxValue)
+
+                          override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = timestampExtractor(element)
+                  })
                 consumer
         }
 
