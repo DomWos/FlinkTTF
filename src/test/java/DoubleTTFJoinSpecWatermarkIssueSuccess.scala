@@ -86,7 +86,7 @@ class DoubleTTFJoinSpecWatermarkIssueSuccess extends TestUtils with GivenWhenThe
       // and results in twice the number of expected results.
       val ratesCcyIsoJoin = tEnv.sqlQuery(
         """
-          |  SELECT ccyIsoCode, ccyIsoName, rate, rates_ts as ccyRatesTse
+          |  SELECT ccyIsoCode, ccyIsoName, rate, rates_ts as ccyRatesTs
           |  FROM RatesTable, LATERAL TABLE(ccyTable(rates_rowtime))
           |  WHERE ccyIsoCode = ratesCcyIsoCode
           |""".stripMargin)
@@ -140,6 +140,10 @@ class DoubleTTFJoinSpecWatermarkIssueSuccess extends TestUtils with GivenWhenThe
 
     When("Multiple taxi fares arrrive before any of the rates or ccy")
     Thread.sleep(10000)
+    val usdCcyIsoDTO1 = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1000L)
+    publishCcyIsoDTO(usdCcyIsoDTO1)(kafkaConfig)
+    Thread.sleep(1000L)
+
     val taxi2 = makeTaxiFareDTO("USD", 15D, 4000L)
     publishTaxiFareDTO(taxi2)(kafkaConfig)
     val taxi3 = makeTaxiFareDTO("USD", 25D, 5000L)
@@ -165,7 +169,7 @@ class DoubleTTFJoinSpecWatermarkIssueSuccess extends TestUtils with GivenWhenThe
     val usd4 = makeRatesDTO("USD", rate=1.7D, ts=20000L)
     publishRatesDTO(usd4)(kafkaConfig)
     Thread.sleep(3000L)
-    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
+    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 7000L)
     publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
     val nonJoinerTimeMoverTaxi2 = makeTaxiFareDTO("USD", 23D, 25000L)
     publishTaxiFareDTO(nonJoinerTimeMoverTaxi2)(kafkaConfig)
