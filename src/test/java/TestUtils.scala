@@ -12,20 +12,21 @@ import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.watermark.Watermark
-import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer
+import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
 import org.apache.flink.types.Row
 import org.apache.flink.util.Collector
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization.{Deserializer, Serializer => kSerializer}
+import org.codehaus.jackson.map.ObjectMapper
 import org.scalatest.concurrent.Eventually.{eventually, interval, timeout}
-import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
+import org.scalatest.{BeforeAndAfter, BeforeAndAfterAll, FlatSpec, Matchers}
 
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.util.Try
 
-class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
+class TestUtils extends FlatSpec with Matchers with BeforeAndAfter {
 
         val ratesTopicName = "RateTopic"
         val ratesDtoSerializer: kSerializer[RatesDTO] = new kSerializer[RatesDTO] {
@@ -111,10 +112,29 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
                 val rawConsumer = new FlinkKafkaConsumer[T](topicName, deserializationSchema, kafkaConsumerConfig)
                 val consumer = env
                   .addSource(rawConsumer)(deserializationSchema.getProducedType)
-                  .assignTimestampsAndWatermarks(new AscendingTimestampExtractor[T] {
-                          override def extractAscendingTimestamp(element: T): Long = timestampExtractor(element)
+                  .assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[T] {
+                          var timestamp = Long.MinValue
+
+                          override def getCurrentWatermark: Watermark = {
+                                  val watermark = if (timestamp == Long.MinValue) new Watermark(Long.MinValue) else new Watermark(timestamp-1)
+                                  println("GENERATING: " + watermark)
+                                  watermark
+                          }
+
+                          override def extractTimestamp(element: T, previousElementTimestamp: Long): Long = {
+                                  timestamp = timestampExtractor(element)
+                                  timestamp
+                          }
                   })
                 consumer
+        }
+
+        def makeProducer[T](outTopic: String, props: Properties, serializationSchema: SerializationSchema[T]): FlinkKafkaProducer[T] = {
+                new FlinkKafkaProducer[T](
+                        outTopic,
+                        serializationSchema,
+                        props
+                )
         }
 
         def makeIdlingFlinkConsumer[T](deserializationSchema: AvroDeserializationSchema[T],
@@ -135,18 +155,21 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
         }
 
         val resultsTopicName = "ResultsTopic"
-        val topics = List(ratesTopicName,taxiFareTopicName, ccyIsoTopicName, resultsTopicName)
+        val OutputTopic = "KafkaOutputProducer"
 
-        override def beforeAll : Unit = {
+        val topics = List(ratesTopicName,taxiFareTopicName, ccyIsoTopicName, resultsTopicName, OutputTopic)
+
+        before {
                 EmbeddedKafka.start()
                 eventually(timeout(5.seconds), interval(1.second)){
                         assert(EmbeddedKafka.isRunning, "Kafka not ready to use")
                 }
                 println("Kafka is running")
                 EmbeddedKafka.deleteTopics(topics)
+
         }
 
-        override def afterAll = {
+        after {
                 EmbeddedKafka.deleteTopics(topics)
                 EmbeddedKafka.stop()
         }
@@ -175,6 +198,15 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfterAll {
 }
 
 
+class AllJoinedSerializationSchema extends SerializationSchema[AllJoined] {
+        lazy val objectMapper = new ObjectMapper()
+        override def serialize(element: AllJoined): Array[Byte] = objectMapper.writer().writeValueAsBytes(element)
+}
+
+class AllJoinedStringSerializationSchema extends SerializationSchema[AllJoinedString] {
+        lazy val objectMapper = new ObjectMapper()
+        override def serialize(element: AllJoinedString): Array[Byte] = objectMapper.writer().writeValueAsBytes(element)
+}
 
 class StringResultSeralizer extends SerializationSchema[(Boolean, Row)] {
 
@@ -187,33 +219,33 @@ class StringResultSeralizer extends SerializationSchema[(Boolean, Row)] {
         }
 }
 
-class CcyIsoBroadcastKeyedFunction extends KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]() {
-        val ccyDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.STRING, Types.POJO(classOf[CcyIsoDTO]))
-        override def processElement(in1: RatesDTO, readOnlyContext: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#ReadOnlyContext,
-                                    collector: Collector[RatesWithCcyName]): Unit = {
-                val ccyIsoDTO: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(ccyDescriptor)
-                if( ccyIsoDTO != null ){
-                        if( in1 != null ) {
-                                val ccyCode = in1.getRatesCcyIsoCode.toString
-                                val ccy = ccyIsoDTO.get(ccyCode)
-                                if( ccy != null ) {
-                                        collector.collect({
-                                                val ccr = new RatesWithCcyName()
-                                                ccr.setRatesCcyIsoCode(in1.getRatesCcyIsoCode.toString)
-                                                ccr.setRate(in1.getRate)
-                                                ccr.setTs(in1.getTs)
-                                                ccr.setCcyName(ccy.getCcyIsoName.toString)
-                                                ccr
-                                        })
-                                }
-                        }
-                }
-        }
-        override def processBroadcastElement(in2: CcyIsoDTO,
-                                             context: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#Context,
-                                             collector: Collector[RatesWithCcyName]): Unit = {
-                val bcState = context.getBroadcastState(ccyDescriptor)
-                bcState.put(in2.getCcyIsoCode.toString, in2)
-                println(s"processBroadcastElement $in2")
-        }
-}
+//class CcyIsoBroadcastKeyedFunction extends KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]() {
+//        val ccyDescriptor = new MapStateDescriptor("ccyIsoCodeBroadcastState", Types.STRING, Types.POJO(classOf[CcyIsoDTO]))
+//        override def processElement(in1: RatesDTO, readOnlyContext: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#ReadOnlyContext,
+//                                    collector: Collector[RatesWithCcyName]): Unit = {
+//                val ccyIsoDTO: ReadOnlyBroadcastState[String, CcyIsoDTO] = readOnlyContext.getBroadcastState(ccyDescriptor)
+//                if( ccyIsoDTO != null ){
+//                        if( in1 != null ) {
+//                                val ccyCode = in1.getRatesCcyIsoCode.toString
+//                                val ccy = ccyIsoDTO.get(ccyCode)
+//                                if( ccy != null ) {
+//                                        collector.collect({
+//                                                val ccr = new RatesWithCcyName()
+//                                                ccr.setRatesCcyIsoCode(new Utf8(in1.getRatesCcyIsoCode.toString))
+//                                                ccr.setRate(in1.getRate)
+//                                                ccr.setTs(in1.getTs)
+//                                                ccr.setCcyName(ccy.getCcyIsoName.toString)
+//                                                ccr
+//                                        })
+//                                }
+//                        }
+//                }
+//        }
+//        override def processBroadcastElement(in2: CcyIsoDTO,
+//                                             context: KeyedBroadcastProcessFunction[String, RatesDTO, CcyIsoDTO, RatesWithCcyName]#Context,
+//                                             collector: Collector[RatesWithCcyName]): Unit = {
+//                val bcState = context.getBroadcastState(ccyDescriptor)
+//                bcState.put(in2.getCcyIsoCode.toString, in2)
+//                println(s"processBroadcastElement $in2")
+//        }
+//}
