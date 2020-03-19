@@ -47,29 +47,16 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
     Given("Running flink environment with 2 TTF Joins")
     val ccyIsoStream = makeIdlingFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]),
       kafkaProperties, 0L, _.getTs, ccyIsoTopicName)
-    ccyIsoStream.map {
-      r => println(r.toString)
-    }
     val ccyIsoTable = tEnv.fromDataStream(ccyIsoStream, 'ccyIsoCode, 'ccyIsoName, 'ts.rowtime.as('ccy_rowtime))
     tEnv.registerTable("CcyIsoTable", ccyIsoTable)
     val ccyTable = ccyIsoTable.createTemporalTableFunction('ccy_rowtime, 'ccyIsoCode)
     tEnv.registerFunction("ccyTable", ccyTable)
 
     val ratesStream = makeFlinkConsumer[RatesDTO](AvroDeserializationSchema.forSpecific[RatesDTO](classOf[RatesDTO]), kafkaProperties, 0L, _.getTs, ratesTopicName)
-    ratesStream.map {
-      r => println(r.toString)
-    }
     val ratesTable = tEnv.fromDataStream(ratesStream, 'ratesCcyIsoCode, 'rate, 'ts.as('rates_ts), 'ts.rowtime.as('rates_rowtime))
     val ratesTTF = ratesTable.createTemporalTableFunction('rates_rowtime, 'ratesCcyIsoCode)
     tEnv.registerFunction("RatesTTF", ratesTTF)
     tEnv.registerTable("RatesTable", ratesTable)
-
-    val faresStream = makeFlinkConsumer[TaxiFareDTO](AvroDeserializationSchema.forSpecific[TaxiFareDTO](classOf[TaxiFareDTO]), kafkaProperties, 0L, _.getTs, taxiFareTopicName)
-    faresStream.map {
-      r => println(r.toString)
-    }
-    val faresTable = tEnv.fromDataStream(faresStream, 'fareCcyIsoCode, 'price, 'ts.as('faresTst), 'ts.rowtime.as('faresRowTime))
-    tEnv.registerTable("FaresTable", faresTable)
 
     // This join get flushed for BOTH rates for some reason
     // and results in twice the number of expected results.
@@ -80,13 +67,11 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
         |  WHERE ccyIsoCode = ratesCcyIsoCode
         |""".stripMargin)
 
-    tEnv.toAppendStream[RatesCcyIsoJoinLong](ratesCcyIsoJoin)
-      .map(
-        r => {
-          println(s"ccyRatesJoin : $r")
-          r
-        }
-      ).assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[RatesCcyIsoJoinLong] {
+    val stream = tEnv.toAppendStream[RatesCcyIsoJoinLong](ratesCcyIsoJoin)
+
+    stream.addSink(ratesJoin => println(s"""RatesCcyJoin :${ratesJoin}"""))
+
+    stream.assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[RatesCcyIsoJoinLong] {
       var maxTst = 0L
       override def getCurrentWatermark: Watermark = new Watermark(maxTst-1)
 
@@ -99,11 +84,10 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
         .timeWindowAll(Time.milliseconds(7000))
         .process(new ProcessAllWindowFunction[RatesCcyIsoJoinLong, String, TimeWindow] {
           override def process(context: Context, elements: Iterable[RatesCcyIsoJoinLong], out: Collector[String]): Unit = {
-            println("PIESKI")
             out.collect(elements.mkString(","))
-          }
-        })
-        .print()
+          }})
+        .addSink(data => System.err.println(s"""OUTPUT: ${data}"""))
+
     Future {
       env.execute()
     }.onComplete {
@@ -114,31 +98,31 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
         fail()
       }
     }
+
     Thread.sleep(7000)
+    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
+    publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
+    Thread.sleep(3000L) //Watermark will be emitted here but it will be min from all streams(18000
+
     val usd1 = makeRatesDTO("USD", rate=1.1D, ts=3000L)
     publishRatesDTO(usd1)(kafkaConfig)
+    Thread.sleep(2000)
     val usd2 = makeRatesDTO("USD", rate=1.7D, ts=6500L)
     publishRatesDTO(usd2)(kafkaConfig)
+    Thread.sleep(2000)
+
     val usd3 = makeRatesDTO("USD", rate=1.7D, ts=8500L)
     publishRatesDTO(usd3)(kafkaConfig)
+    Thread.sleep(2000)
+
     val usd4 = makeRatesDTO("USD", rate=1.7D, ts=20000L)
     publishRatesDTO(usd4)(kafkaConfig)
     Thread.sleep(3000L)
 
-    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
-    publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
-    Thread.sleep(7000L) //Watermark will be emitted here but it will be min from all streams(18000
 
     Eventually.eventually(timeout(Span(35, Seconds)),interval(Span(3 ,Seconds))) {
-      val messages = EmbeddedKafka.consumeNumberMessagesFrom(OutputTopic, 3)(EmbeddedKafkaConfig.defaultConfig, new Deserializer[AllJoined] {
-        val objectMapper = new ObjectMapper()
-        override def configure(configs: util.Map[String, _], isKey: Boolean): Unit = {}
-
-        override def deserialize(topic: String, data: Array[Byte]): AllJoined = objectMapper.readValue(data, classOf[AllJoined])
-
-        override def close(): Unit = {}
-      } )
-      println(messages)
+      Thread.sleep(1000);
+      throw new Exception("Just to keep it spinning")
     }
   }
 
