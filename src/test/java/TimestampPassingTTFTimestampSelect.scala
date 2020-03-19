@@ -36,9 +36,9 @@ class TimestampPassingTTFTimestampSelect extends TestUtils with GivenWhenThen  w
   kafkaProperties.setProperty("group.id", "FlinkJoinProblemSpec")
   kafkaProperties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
 
-  "Demo" should
+  "TTF" should
     """
-     show that joins are properly done if fares arrive first""".stripMargin in {
+    should emit two windows when selected type is Timestamp""".stripMargin in {
     implicit val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
