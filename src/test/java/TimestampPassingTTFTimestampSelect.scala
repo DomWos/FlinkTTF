@@ -66,7 +66,7 @@ class TimestampPassingTTFTimestampSelect extends TestUtils with Eventually{
 
     val stream = tEnv.toAppendStream[RatesCcyIsoJoinTimestamp](ratesCcyIsoJoin)
 
-    stream.addSink(data => s"""RatesCcyJoin: ${data}""")
+    stream.addSink(data => s"""Output from temporal table join: ${data}""")
 
     stream
       .timeWindowAll(Time.milliseconds(7000))
@@ -75,7 +75,7 @@ class TimestampPassingTTFTimestampSelect extends TestUtils with Eventually{
           out.collect(elements.mkString(","))
         }
       })
-      .addSink(data => System.err.println(s"""OUTPUT: ${data}"""))
+      .addSink(data => System.err.println(s"""Output from window process function: ${data}"""))
 
     Future {
       env.execute()
