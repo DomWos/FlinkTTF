@@ -25,7 +25,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 @RunWith(classOf[JUnitRunner])
-class PostSQJoinTTF extends TestUtils with GivenWhenThen with Eventually {
+class PostSQJoinTTFTest extends TestUtils with GivenWhenThen with Eventually {
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)

@@ -4,22 +4,15 @@ import bbb.avro.dto.{CcyIsoDTO, RatesDTO, TaxiFareDTO}
 import net.manub.embeddedkafka.{EmbeddedKafka, EmbeddedKafkaConfig}
 import org.apache.avro.specific.SpecificDatumWriter
 import org.apache.flink.api.common.serialization.SerializationSchema
-import org.apache.flink.api.common.state.{MapStateDescriptor, ReadOnlyBroadcastState}
-import org.apache.flink.api.common.typeinfo.Types
 import org.apache.flink.formats.avro.AvroDeserializationSchema
-import org.apache.flink.streaming.api.functions.{AssignerWithPeriodicWatermarks, AssignerWithPunctuatedWatermarks}
-import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction
-import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor
+import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.types.Row
-import org.apache.flink.util.Collector
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.serialization.{Deserializer, Serializer => kSerializer}
-import org.codehaus.jackson.map.ObjectMapper
 import org.scalatest.concurrent.Eventually.{eventually, interval, timeout}
-import org.scalatest.{BeforeAndAfter, BeforeAndAfterAll, FlatSpec, Matchers}
+import org.scalatest.{BeforeAndAfter, FlatSpec, Matchers}
 
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration._
