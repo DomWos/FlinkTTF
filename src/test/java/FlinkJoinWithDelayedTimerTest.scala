@@ -27,7 +27,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 @RunWith(classOf[JUnitRunner])
-class FlinkJoinWithDelayedBroadcastFaresFirst extends TestUtils with Eventually {
+class FlinkJoinWithDelayedTimerTest extends TestUtils with Eventually {
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)
@@ -36,7 +36,7 @@ class FlinkJoinWithDelayedBroadcastFaresFirst extends TestUtils with Eventually 
 
   private implicit val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
   env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-  env.getConfig.setAutoWatermarkInterval(5000L)
+  env.getConfig.setAutoWatermarkInterval(10L)
   env.setParallelism(1)
   env.setMaxParallelism(1)
   env.setBufferTimeout(1000L)

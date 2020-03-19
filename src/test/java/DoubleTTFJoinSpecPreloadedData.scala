@@ -38,7 +38,7 @@ class DoubleTTFJoinSpecPreloadedData extends TestUtils with GivenWhenThen with E
     """.stripMargin in {
     implicit val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    env.setParallelism(1)
+//    env.setParallelism(1)
     env.getConfig.setAutoWatermarkInterval(5000L)
     implicit val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env, new TableConfig())
     /*
@@ -71,15 +71,16 @@ class DoubleTTFJoinSpecPreloadedData extends TestUtils with GivenWhenThen with E
     val faresTable = tEnv.fromDataStream(faresStream, 'fareCcyIsoCode, 'price, 'ts.as('faresTst), 'ts.rowtime.as('faresRowTime))
     tEnv.registerTable("FaresTable", faresTable)
 
+    tEnv.registerFunction("faresTTF", faresTable.createTemporalTableFunction('faresRowTime, 'fareCcyIsoCode))
     // This join get flushed for BOTH rates for some reason
     // and results in twice the number of expected results.
     val ratesCcyIsoJoin = tEnv.sqlQuery(
       """
-        |  SELECT ccyIsoCode, ccyIsoName, rate, rates_ts as ccyRatesTs
-        |  FROM RatesTable, LATERAL TABLE(ccyTable(rates_rowtime))
+        |  SELECT ratesCcyIsoCode, ccyIsoName as ccyName, rate, rates_ts as ts
+        |  FROM RatesTable, CcyIsoTable
         |  WHERE ccyIsoCode = ratesCcyIsoCode
         |""".stripMargin)
-
+    tEnv.registerDataStream("ccyRatesJoin", ratesCcyIsoJoin.toAppendStream[RatesWithCcyNameUtf].assignAscendingTimestamps(_.getTs), 'ratesCcyIsoCode, 'ccyName, 'ts, 'ts.rowtime.as('rates_rowtime), 'rate)
     tEnv.toAppendStream[Row](ratesCcyIsoJoin)
       .map(
         r => {
@@ -87,42 +88,12 @@ class DoubleTTFJoinSpecPreloadedData extends TestUtils with GivenWhenThen with E
         }
       )
 
-    val taxi2 = makeTaxiFareDTO("USD", 15D, 4000L)
-    publishTaxiFareDTO(taxi2)(kafkaConfig)
-    val taxi3 = makeTaxiFareDTO("USD", 25D, 5000L)
-    publishTaxiFareDTO(taxi3)(kafkaConfig)
-    val taxi4 = makeTaxiFareDTO("USD", 10D, 6000L)
-    publishTaxiFareDTO(taxi4)(kafkaConfig)
-    val taxi5 = makeTaxiFareDTO("USD", 17D, 7000L)
-    publishTaxiFareDTO(taxi5)(kafkaConfig)
-    val taxi6 = makeTaxiFareDTO("USD", 18D, 8000L)
-    publishTaxiFareDTO(taxi6)(kafkaConfig)
-    val taxi7 = makeTaxiFareDTO("USD", 23D, 9000L)
-    publishTaxiFareDTO(taxi7)(kafkaConfig)
-    val taxi8 = makeTaxiFareDTO("USD", 23D, 18000L)
-    publishTaxiFareDTO(taxi8)(kafkaConfig)
-    Thread.sleep(3000L)
-
-    val usd1 = makeRatesDTO("USD", rate=1.1D, ts=3000L)
-    publishRatesDTO(usd1)(kafkaConfig)
-    val usd2 = makeRatesDTO("USD", rate=1.7D, ts=6500L)
-    publishRatesDTO(usd2)(kafkaConfig)
-    val usd3 = makeRatesDTO("USD", rate=1.7D, ts=8500L)
-    publishRatesDTO(usd3)(kafkaConfig)
-    val usd4 = makeRatesDTO("USD", rate=1.7D, ts=20000L)
-    publishRatesDTO(usd4)(kafkaConfig)
-    Thread.sleep(3000L)
-    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
-    publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
-    val nonJoinerTimeMoverTaxi2 = makeTaxiFareDTO("USD", 23D, 25000L)
-    publishTaxiFareDTO(nonJoinerTimeMoverTaxi2)(kafkaConfig)
-    Thread.sleep(10000L)
 
     val fareRatesJoin = tEnv.sqlQuery(
       """
-        | SELECT faresTst, price * rate AS convFare, fareCcyIsoCode, rates_ts as fareRatesTs, rate as realRate
-        | FROM FaresTable,
-        | LATERAL TABLE( RatesTTF(faresRowTime) )
+        | SELECT faresTst, price * rate AS convFare, fareCcyIsoCode, ts as fareRatesTs, rate as realRate
+        | FROM ccyRatesJoin,
+        | LATERAL TABLE( faresTTF(rates_rowtime) )
         | WHERE fareCcyIsoCode = ratesCcyIsoCode
         |""".stripMargin)
 
@@ -135,17 +106,17 @@ class DoubleTTFJoinSpecPreloadedData extends TestUtils with GivenWhenThen with E
 
     val testSink = new TestSink
 
-    val allJoined = fareRatesJoin
-      .join(ratesCcyIsoJoin)
-      .where('fareCcyIsoCode === 'ccyIsoCode && 'fareRatesTs === 'ccyRatesTs)
-    tEnv.toAppendStream[AllJoined](allJoined)
-      .map(
-        r => {
-          testSink.arrayBuffer.add(r)
-          println(s"allJoined : $r")
-          r
-        }
-      ).addSink(makeProducer(OutputTopic, kafkaProperties, new AllJoinedSerializationSchema()))
+////    val allJoined = fareRatesJoin
+////      .join(ratesCcyIsoJoin)
+////      .where('fareCcyIsoCode === 'ccyIsoCode && 'fareRatesTs === 'ccyRatesTs)
+//    tEnv.toAppendStream[AllJoined](allJoined)
+//      .map(
+//        r => {
+//          testSink.arrayBuffer.add(r)
+//          println(s"allJoined : $r")
+//          r
+//        }
+//      ).addSink(makeProducer(OutputTopic, kafkaProperties, new AllJoinedSerializationSchema()))
     Future {
       env.execute()
     }.onComplete {
@@ -156,7 +127,56 @@ class DoubleTTFJoinSpecPreloadedData extends TestUtils with GivenWhenThen with E
         fail()
       }
     }
+    Thread.sleep(5000)
+    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
+    publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
+    Thread.sleep(8000)
+    val taxi2 = makeTaxiFareDTO("USD", 15D, 4000L)
+    publishTaxiFareDTO(taxi2)(kafkaConfig)
+    Thread.sleep(2000L)
+    val taxi3 = makeTaxiFareDTO("USD", 25D, 5000L)
+    publishTaxiFareDTO(taxi3)(kafkaConfig)
+    Thread.sleep(2000L)
 
+    val taxi4 = makeTaxiFareDTO("USD", 10D, 6000L)
+    publishTaxiFareDTO(taxi4)(kafkaConfig)
+    Thread.sleep(2000L)
+
+    val taxi5 = makeTaxiFareDTO("USD", 17D, 7000L)
+    publishTaxiFareDTO(taxi5)(kafkaConfig)
+    Thread.sleep(2000L)
+
+    val taxi6 = makeTaxiFareDTO("USD", 18D, 8000L)
+    publishTaxiFareDTO(taxi6)(kafkaConfig)
+    Thread.sleep(2000L)
+
+    val taxi7 = makeTaxiFareDTO("USD", 23D, 9000L)
+    publishTaxiFareDTO(taxi7)(kafkaConfig)
+    Thread.sleep(2000L)
+
+    val taxi8 = makeTaxiFareDTO("USD", 23D, 18000L)
+    publishTaxiFareDTO(taxi8)(kafkaConfig)
+    Thread.sleep(3000L)
+
+    val usd1 = makeRatesDTO("USD", rate=1.1D, ts=3000L)
+    publishRatesDTO(usd1)(kafkaConfig)
+    Thread.sleep(2000L)
+
+    val usd2 = makeRatesDTO("USD", rate=1.7D, ts=6500L)
+    publishRatesDTO(usd2)(kafkaConfig)
+    Thread.sleep(2000L)
+
+    val usd3 = makeRatesDTO("USD", rate=1.7D, ts=8500L)
+    publishRatesDTO(usd3)(kafkaConfig)
+    Thread.sleep(2000L)
+
+    val usd4 = makeRatesDTO("USD", rate=1.7D, ts=20000L)
+    publishRatesDTO(usd4)(kafkaConfig)
+    Thread.sleep(3000L)
+    Thread.sleep(20000L)
+    val nonJoinerTimeMoverTaxi2 = makeTaxiFareDTO("USD", 23D, 25000L)
+    publishTaxiFareDTO(nonJoinerTimeMoverTaxi2)(kafkaConfig)
+    Thread.sleep(10000L)
 
     When("Multiple taxi fares arrrive before any of the rates or ccy")
 

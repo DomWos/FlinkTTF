@@ -145,22 +145,33 @@ class DoubleTTFJoinSpecWatermarkIssueFail extends TestUtils with GivenWhenThen w
     publishTaxiFareDTO(taxi7)(kafkaConfig)
     val taxi8 = makeTaxiFareDTO("USD", 23D, 18000L)
     publishTaxiFareDTO(taxi8)(kafkaConfig)
-    Thread.sleep(3000L)
-
     val usd1 = makeRatesDTO("USD", rate=1.1D, ts=3000L)
     publishRatesDTO(usd1)(kafkaConfig)
     val usd2 = makeRatesDTO("USD", rate=1.7D, ts=6500L)
     publishRatesDTO(usd2)(kafkaConfig)
     val usd3 = makeRatesDTO("USD", rate=1.7D, ts=8500L)
     publishRatesDTO(usd3)(kafkaConfig)
-    val usd4 = makeRatesDTO("USD", rate=1.7D, ts=20000L)
-    publishRatesDTO(usd4)(kafkaConfig)
-    Thread.sleep(10000L)
+
+    Thread.sleep(6000L)
 
     val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
     publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
+    Thread.sleep(6000L)
+    val usd99 = makeRatesDTO("USD", rate=1.7D, ts=10000L)
+    publishRatesDTO(usd99)(kafkaConfig)
     val nonJoinerTimeMoverTaxi2 = makeTaxiFareDTO("USD", 23D, 25000L)
     publishTaxiFareDTO(nonJoinerTimeMoverTaxi2)(kafkaConfig)
+    val nonJoinerTimeMoverTaxi3 = makeTaxiFareDTO("USD", 23D, 29000L)
+    publishTaxiFareDTO(nonJoinerTimeMoverTaxi3)(kafkaConfig)
+    Thread.sleep(6000L)
+    val usdCcyIsoDTO2 = makeCcyIsoDTO("USD", "NO_DOLLARS", ts= 5000L)
+    publishCcyIsoDTO(usdCcyIsoDTO2)(kafkaConfig)
+    Thread.sleep(1000)
+    val usd4 = makeRatesDTO("USD", rate=1.7D, ts=30000L)
+    publishRatesDTO(usd4)(kafkaConfig)
+    val usd5 = makeRatesDTO("USD", rate=1.7D, ts=32000L)
+    publishRatesDTO(usd5)(kafkaConfig)
+
     Thread.sleep(7000L)
 
 

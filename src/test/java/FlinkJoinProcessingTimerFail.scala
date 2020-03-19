@@ -10,12 +10,10 @@ import org.apache.flink.api.java.functions.KeySelector
 import org.apache.flink.api.scala._
 import org.apache.flink.formats.avro.AvroDeserializationSchema
 import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala.{DataStream, KeyedStream, StreamExecutionEnvironment}
 import org.apache.flink.table.api.TableConfig
 import org.apache.flink.table.api.scala.{StreamTableEnvironment, _}
 import org.apache.flink.types.Row
-import org.apache.flink.util.Collector
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.common.serialization.Deserializer
 import org.codehaus.jackson.map.ObjectMapper
@@ -29,7 +27,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 @RunWith(classOf[JUnitRunner])
-class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with Eventually {
+class FlinkJoinProcessingTimerFail extends TestUtils with Eventually {
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)
@@ -38,9 +36,7 @@ class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with 
 
   private implicit val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
   env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-  env.getConfig.setAutoWatermarkInterval(3000L)
-  env.setParallelism(1)
-  env.setMaxParallelism(1)
+  env.getConfig.setAutoWatermarkInterval(10L)
   env.setBufferTimeout(1000L)
   implicit val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env, new TableConfig())
 
@@ -49,7 +45,7 @@ class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with 
       Show use to Broadcast to enrich rates stream prior to joining with TaxiFares
     """.stripMargin in {
 
-    val ccyIsoStream = makeIdlingFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]),
+    val ccyIsoStream = makeFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]),
       kafkaProperties, 0L, _.getTs, ccyIsoTopicName)
     ccyIsoStream.map{
       r=>println(r.toString)
@@ -72,7 +68,7 @@ class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with 
     val ccyMatches: DataStream[RatesWithCcyName] = ratesPartitionedStream
       .connect(broadcastCcys)
       .process( new DelayedKeyedBroadcast())
-        .assignAscendingTimestamps(_.getTs)
+
     ccyMatches.map{
       r=> println(s"ccyMatches $r")
         r
@@ -85,11 +81,9 @@ class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with 
 
     tEnv.toAppendStream[Row](
       tEnv.sqlQuery("SELECT * FROM RatesCcyMatchTable"))
-      .process(new ProcessFunction[Row, Row] {
-        override def processElement(value: Row, ctx: ProcessFunction[Row, Row]#Context, out: Collector[Row]): Unit = {
-          println("Rates Match Watermark :" , ctx.timerService().currentWatermark())
-        }
-      })
+      .map(
+        r=>println(s"RatesCcyMatchTable $r")
+      )
 
     val faresStream  = makeFlinkConsumer[TaxiFareDTO](AvroDeserializationSchema.forSpecific[TaxiFareDTO](classOf[TaxiFareDTO]), kafkaProperties,0L, _.getTs, taxiFareTopicName)
     val asPojo = faresStream.map{
@@ -113,12 +107,11 @@ class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with 
         |""".stripMargin)
 
     tEnv.toAppendStream[AllJoinedString](fareRatesJoin)
-      .process(new ProcessFunction[AllJoinedString, AllJoinedString] {
-        override def processElement(value: AllJoinedString, ctx: ProcessFunction[AllJoinedString, AllJoinedString]#Context, out: Collector[AllJoinedString]): Unit = {
-          println("AllJoinedWatermark: " + ctx.timerService().currentWatermark())
-          out.collect(value)
+      .map(
+        r=>{
+          println(s"fareRatesJoin : $r")
+          r
         }
-      }
       ).addSink(makeProducer(OutputTopic, kafkaProperties, new AllJoinedStringSerializationSchema))
 
     Future {
@@ -130,18 +123,21 @@ class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with 
         exception.printStackTrace()
         fail()
     }
-    Thread.sleep(10000)
+
 
     val usd1 = makeRatesDTO("USD", rate=1.1D, ts=3000L)
     publishRatesDTO(usd1)(kafkaConfig)
-    Thread.sleep(5000L)
     val usd2 = makeRatesDTO("USD", rate=1.7D, ts=6500L)
     publishRatesDTO(usd2)(kafkaConfig)
     val usd3 = makeRatesDTO("USD", rate=1.7D, ts=8500L)
     publishRatesDTO(usd3)(kafkaConfig)
     val usd4 = makeRatesDTO("USD", rate=1.7D, ts=20000L)
     publishRatesDTO(usd4)(kafkaConfig)
-    Thread.sleep(7000L)
+    Thread.sleep(8000L)
+
+    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
+    publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
+    Thread.sleep(7000L) //Watermark will be emitted here but it will be min from all streams(18000L, Long.MAX, Long.MIN)
     val taxi2 = makeTaxiFareDTO("USD", 15D, 4000L)
     publishTaxiFareDTO(taxi2)(kafkaConfig)
     val taxi3 = makeTaxiFareDTO("USD", 25D, 5000L)
@@ -156,14 +152,11 @@ class FlinkJoinWithDelayedBroadcastWatermarkIssueSuccess extends TestUtils with 
     publishTaxiFareDTO(taxi7)(kafkaConfig)
     val taxi8 = makeTaxiFareDTO("USD", 23D, 18000L)
     publishTaxiFareDTO(taxi8)(kafkaConfig)
-    Thread.sleep(7000L) // This will generate timestamp, but
+    Thread.sleep(8000L)
 
-    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
-    publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
-    Thread.sleep(7000L)
-    val usdCcyIsoDTO2 = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1000L)
-    publishCcyIsoDTO(usdCcyIsoDTO2)(kafkaConfig)
-    Thread.sleep(7000L) //Watermark will be emitted here but it will be min from all streams(18000L, Long.MAX, Long.MIN)
+    Thread.sleep(6000L) // This will generate timestamp, but
+
+
     val nonJoinerTimeMoverTaxi2 = makeTaxiFareDTO("USD", 23D, 25000L)
     publishTaxiFareDTO(nonJoinerTimeMoverTaxi2)(kafkaConfig)
     val usd6 = makeRatesDTO("USD", rate=1.7D, ts=24000L)

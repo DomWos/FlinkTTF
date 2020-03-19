@@ -169,10 +169,19 @@ class DoubleTTFJoinSpecWatermarkIssueSuccess extends TestUtils with GivenWhenThe
     val usd4 = makeRatesDTO("USD", rate=1.7D, ts=20000L)
     publishRatesDTO(usd4)(kafkaConfig)
     Thread.sleep(3000L)
-    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 7000L)
+    val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1l)
     publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
+    Thread.sleep(6000L)
+    val usdCcyIsoDTO2 = makeCcyIsoDTO("USD", "NO_So_Dollars", ts= 100l)
+    publishCcyIsoDTO(usdCcyIsoDTO2)(kafkaConfig)
     val nonJoinerTimeMoverTaxi2 = makeTaxiFareDTO("USD", 23D, 25000L)
     publishTaxiFareDTO(nonJoinerTimeMoverTaxi2)(kafkaConfig)
+    val usd7 = makeRatesDTO("USD", rate=1.7D, ts=22000L)
+    publishRatesDTO(usd7)(kafkaConfig)
+    val usd5 = makeRatesDTO("USD", rate=1.7D, ts=23000L)
+    publishRatesDTO(usd5)(kafkaConfig)
+    Thread.sleep(3000L)
+
     Thread.sleep(15000L)
 
 
