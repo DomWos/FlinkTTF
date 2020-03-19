@@ -29,7 +29,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 
-class TimestampPassingTTFTimestampSelect extends TestUtils with GivenWhenThen  with Eventually{
+class TimestampPassingTTFTimestampSelect extends TestUtils with Eventually{
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)
@@ -44,10 +44,7 @@ class TimestampPassingTTFTimestampSelect extends TestUtils with GivenWhenThen  w
     env.setParallelism(1)
     env.getConfig.setAutoWatermarkInterval(5000L)
     implicit val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env, new TableConfig())
-    /*
-    This test will work IF AND ONLY IF the ccy will arrive before the watermark as the watermarking is disabled for this stream (Can this be an issue ?)
-     */
-    Given("Running flink environment with 2 TTF Joins")
+
     val ccyIsoStream = makeIdlingFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]), kafkaProperties, 0L, _.getTs, ccyIsoTopicName)
     val ccyIsoTable = tEnv.fromDataStream(ccyIsoStream, 'ccyIsoCode, 'ccyIsoName, 'ts.rowtime.as('ccy_rowtime))
     tEnv.registerTable("CcyIsoTable", ccyIsoTable)
@@ -60,9 +57,6 @@ class TimestampPassingTTFTimestampSelect extends TestUtils with GivenWhenThen  w
     tEnv.registerFunction("RatesTTF", ratesTTF)
     tEnv.registerTable("RatesTable", ratesTable)
 
-
-    // This join get flushed for BOTH rates for some reason
-    // and results in twice the number of expected results.
     val ratesCcyIsoJoin = tEnv.sqlQuery(
       """
         |  SELECT ccyIsoCode, ccyIsoName, rate, rates_rowtime as ratesTs
@@ -93,8 +87,8 @@ class TimestampPassingTTFTimestampSelect extends TestUtils with GivenWhenThen  w
         fail()
       }
     }
-    Thread.sleep(7000)
 
+    Thread.sleep(7000)
     val usdCcyIsoDTO = makeCcyIsoDTO("USD", "US_DOLLARS", ts= 1L)
     publishCcyIsoDTO(usdCcyIsoDTO)(kafkaConfig)
 

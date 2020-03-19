@@ -26,7 +26,7 @@ import scala.concurrent.ExecutionContext.Implicits._
 import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
-class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with Eventually{
+class TimestampPassingTTFLongSelect extends TestUtils with Eventually{
 
   val kafkaProperties: Properties = new Properties()
   kafkaProperties.setProperty("bootstrap.servers", kafkaConfig.bootstrapServers)
@@ -41,10 +41,8 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
     env.setParallelism(1)
     env.getConfig.setAutoWatermarkInterval(5000L)
     implicit val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env, new TableConfig())
-    /*
-    This test will work IF AND ONLY IF the ccy will arrive before the watermark as the watermarking is disabled for this stream (Can this be an issue ?)
-     */
-    Given("Running flink environment with 2 TTF Joins")
+
+
     val ccyIsoStream = makeIdlingFlinkConsumer[CcyIsoDTO](AvroDeserializationSchema.forSpecific[CcyIsoDTO](classOf[CcyIsoDTO]),
       kafkaProperties, 0L, _.getTs, ccyIsoTopicName)
     val ccyIsoTable = tEnv.fromDataStream(ccyIsoStream, 'ccyIsoCode, 'ccyIsoName, 'ts.rowtime.as('ccy_rowtime))
@@ -58,8 +56,7 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
     tEnv.registerFunction("RatesTTF", ratesTTF)
     tEnv.registerTable("RatesTable", ratesTable)
 
-    // This join get flushed for BOTH rates for some reason
-    // and results in twice the number of expected results.
+
     val ratesCcyIsoJoin = tEnv.sqlQuery(
       """
         |  SELECT ccyIsoCode, ccyIsoName, rate, rates_ts as ratesLong
@@ -69,7 +66,7 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
 
     val stream = tEnv.toAppendStream[RatesCcyIsoJoinLong](ratesCcyIsoJoin)
 
-    stream.addSink(ratesJoin => println(s"""RatesCcyJoin :${ratesJoin}"""))
+    stream.addSink(ratesJoin => println(s"""Output from Temporal Table Function :${ratesJoin}"""))
 
     stream.assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[RatesCcyIsoJoinLong] {
       var maxTst = 0L
@@ -86,7 +83,7 @@ class TimestampPassingTTFLongSelect extends TestUtils with GivenWhenThen  with E
           override def process(context: Context, elements: Iterable[RatesCcyIsoJoinLong], out: Collector[String]): Unit = {
             out.collect(elements.mkString(","))
           }})
-        .addSink(data => System.err.println(s"""OUTPUT: ${data}"""))
+        .addSink(data => System.err.println(s"""Output from Window Process Function: ${data}"""))
 
     Future {
       env.execute()

@@ -117,7 +117,6 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfter {
 
                           override def getCurrentWatermark: Watermark = {
                                   val watermark = if (timestamp == Long.MinValue) new Watermark(Long.MinValue) else new Watermark(timestamp-1)
-//                                  println("GENERATING: " + watermark + " FOR " + topicName)
                                   watermark
                           }
 
@@ -148,7 +147,6 @@ class TestUtils extends FlatSpec with Matchers with BeforeAndAfter {
                   .addSource(rawConsumer)(deserializationSchema.getProducedType)
                   .assignTimestampsAndWatermarks(new AssignerWithPeriodicWatermarks[T] {
                           override def getCurrentWatermark: Watermark =  {
-//                                  println("MAX LONG GENERATED FOR :" + topicName)
                                   new Watermark(Long.MaxValue)
                           }
 
