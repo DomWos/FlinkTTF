@@ -1,3 +1,5 @@
+package ai.humn;
+
 import org.apache.avro.io.BinaryEncoder;
 import org.apache.avro.io.EncoderFactory;
 import org.apache.avro.specific.SpecificDatumWriter;
@@ -7,7 +9,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 public class AvroSerializer {
-    byte[] serializeAvro(SpecificRecord[] records, SpecificDatumWriter writer) throws IOException {
+    public byte[] serializeAvro(SpecificRecord[] records, SpecificDatumWriter writer) throws IOException {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         BinaryEncoder encoder = EncoderFactory.get().binaryEncoder(outputStream, (BinaryEncoder)null);
         SpecificRecord[] var5 = records;
